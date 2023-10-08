@@ -6,11 +6,11 @@ FlagAttention is a project for memory-efficient attention operators implemented 
 
 ## Requirements
 
-Flag Attention requires torch and triton. To use new features of triton, triton nightly is recommended.
+FlagAttention requires Torch and Triton. To use new features of Triton, Triton nightly is recommended.
 
-Instructions for installing torch nightly can be found at https://pytorch.org/get-started/locally/ . Triton is now a dependency of torch nightly, so it can be installed automatically.
+Instructions for installing Torch nightly can be found at https://pytorch.org/get-started/locally/ . Triton is now a dependency of torch nightly, so it can be installed automatically.
 
-Flag Attention requires Ampere Nvidia GPUs(e.g. A100, RTX-3090, ...) and CUDA Toolkit 11.6 and above. Other GPUs may work but not been tested yet.
+FlagAttention requires Ampere Nvidia GPUs(e.g. A100, RTX-3090, ...) and CUDA Toolkit 11.6 and above. Other GPUs may work but not been tested yet.
 
 FlagAttention can be installed in either way below.
 
@@ -19,7 +19,7 @@ FlagAttention can be installed in either way below.
 
 ### Editable Installation
 
-Editable installation with `pip`.
+Editable installation with pip.
 
 ```sh
 git clone https://github.com/FlagOpen/FlagAttention && cd FlagAttention
@@ -28,7 +28,7 @@ pip install -e .
 
 ### Build a Distribution & Install
 
-Following modern python packaging convention, `FlagAttention` is configured by [`pyproject.toml`](https://pip.pypa.io/en/stable/reference/build-system/pyproject-toml/), and no `setup.py` is provided. To build a distribution, either a source distribution or a binary distribution, python module `build` is recommended.
+Following modern python packaging convention, FlagAttention is configured by [`pyproject.toml`](https://pip.pypa.io/en/stable/reference/build-system/pyproject-toml/), and no `setup.py` is provided. To build a distribution, either a source distribution or a binary distribution, python package `build` is recommended.
 
 First, install `build` package via pip.
 
@@ -55,7 +55,7 @@ FlagAttention provides customized attention operators. When an operator is equiv
 
 ## Run the Tests
 
-A recent version of `pytest`(>=7.1.0) is required to run the tests in `tests`. Operators in `FlagAttention` are tested against a reference implementation in pytorch, both forward and backward. For `float16` and `bfloat16`. we set absolute and relative tolerance to `1e-2` and `1e-3`, respectively.
+A recent version of `pytest`(>=7.1.0) is required to run the tests in `tests/`. Operators in `FlagAttention` are tested against a [reference implementation](tests/flag_attn/ref_impl) in pytorch, both forward and backward. For `float16` and `bfloat16`, we set absolute and relative tolerance to `1e-2` and `1e-3`, respectively.
 
 ```sh
 pytest .
@@ -63,15 +63,17 @@ pytest .
 
 ## Run the Benchmark
 
-Benchmarks are provided to measure the TFLOPs/s achieved. Since operators in `FlagAttention` deviates from flash attention, the total amount of computation is different even when batch size, sequence length, number of heads, head dimension, and other configurations are the same. To calculate the FLOPs of an operator, only matmuls are counted. The FLOPs is divided by the median runtime to get the achieved FLOPs/s.
+Benchmarks are provided to measure the TFLOPs/s achieved. Since operators in `FlagAttention` deviates from Flash Attention, the total amount of computation is different even when batch size, sequence length, number of heads, head dimension, and other configurations are the same. To calculate the FLOPs of an operator, only matmuls are counted. The FLOPs is divided by the median runtime to get the achieved FLOPs/s.
 
 ## Operators
 
 ### Piecewise Attention
 
-The first extension of flash attention is [piecewise attention](src/flag_attn/piecewise.py).
+The first extension of Flash Attention is [piecewise attention](src/flag_attn/piecewise.py).
 
-```
+The interface is show below.
+
+```python
 piecewise_attention(q1, k1, q2, k2, v, dist_threshold, softmax_scale=None, causal=False)
 ```
 
@@ -85,18 +87,17 @@ Features:
 
 - the sequence length of k/v can be larger than that of q;
 - data type support, float16 and bfloat16 for Ampere Nvidia GPUs;
-- support causal and non causal modes.
+- support causal and non-causal modes.
 - support forward & backward modes.
 
 Limitations:
 
 - headdim should be in `[16, 32, 64, 128]`.
-- dropout is not supported yet.
+- dropout of attention weights is not supported yet.
 
 ## TODOs
 
 1. Test on other GPUs;
 2. Test on more triton versions 
 3. Improve performance of attention operators.
-2. Support other extensions of flash attention.
-
+2. Support other extensions to flash attention.
