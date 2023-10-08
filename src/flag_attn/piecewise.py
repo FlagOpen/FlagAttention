@@ -72,11 +72,11 @@ def standalone_forward(q1, k1, q2, k2, v, w, causal, sm_scale):
     assert Dk1 in {16, 32, 64, 128}
     o = torch.empty_like(q1)
     BLOCK_M = 128
-    BLOCK_N = 64 if Dk1 <= 64 else 32
+    BLOCK_N = 64
 
     # piecewise attention use more shm than flash attention
-    num_stages = 1
-    num_warps = 4
+    num_stages = 3 if Dk1 <=64 else 1
+    num_warps = 4 if Dk1 <=64 else 8
 
     B, H, M, D = q1.shape
     N = k1.shape[2]
@@ -109,9 +109,13 @@ def standalone_forward(q1, k1, q2, k2, v, w, causal, sm_scale):
     return o, L
 
 def standalone_backward(q1, k1, q2, k2, v, w, causal, sm_scale, o, L, do):
-    BLOCK_M = 64
-    BLOCK_N = 64
     B, H, M, D = q1.shape
+
+    BLOCK_M = 64 if D<=64 else 128 
+    BLOCK_N = 64
+    num_stages = 1
+    num_warps = 4 if D <=64 else 8 
+
     N = k1.shape[2]
     P_SEQ = N - M
     is_fp16 = q1.dtype is torch.float16
@@ -153,7 +157,8 @@ def standalone_backward(q1, k1, q2, k2, v, w, causal, sm_scale, o, L, do):
         BLOCK_N=BLOCK_N,
         CAUSAL=causal,
         IS_FP16=is_fp16,
-        num_stages=1,
+        num_stages=num_stages,
+        num_warps=num_warps,
         )
     
     dq1 = torch.zeros_like(q1)
@@ -177,7 +182,8 @@ def standalone_backward(q1, k1, q2, k2, v, w, causal, sm_scale, o, L, do):
         BLOCK_N=BLOCK_N,
         CAUSAL=causal,
         IS_FP16=is_fp16,
-        num_stages=1,
+        num_stages=num_stages,
+        num_warps=num_warps,
         )
     torch.cuda.set_device(orginal_device_index)
     return dq1, dk1, dq2, dk2, dv

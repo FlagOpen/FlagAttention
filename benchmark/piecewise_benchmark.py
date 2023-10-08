@@ -17,26 +17,31 @@ except BaseException:
         FLASH_VER = None
 HAS_FLASH = FLASH_VER is not None
 
-BATCH, N_HEADS, N_CTX, D_HEAD = 4, 48, 4096, 64
 
 configs = [triton.testing.Benchmark(
     x_names=['N_CTX'],
-    x_vals=[2**i for i in range(10, 16)],
+    x_vals=[2**i for i in range(9, 16)],
     line_arg='provider',
     line_vals=['triton', ] + (['flash'] if HAS_FLASH else []),
     line_names=['triton', ] + ([f'flash-{FLASH_VER}'] if HAS_FLASH else []),
     styles=[('red', '-'), ('green', '-')],
     ylabel='tflop/s',
-    plot_name=f'piecewise_attention_batch-{BATCH}_head-{N_HEADS}_d-{D_HEAD}_mode-{mode}_caucal-{causal}_dtype-{dtype}',
-    args={'H': N_HEADS, 'BATCH': BATCH, 'D_HEAD': D_HEAD, 'dtype': dtype, 'mode': mode, 'causal': causal}
-) for mode in ['fwd', 'bwd'] for causal in [False, True] for dtype in [torch.float16, torch.bfloat16]] 
+    plot_name=f'piecewise_attention_d-{D_HEAD}_mode-{mode}_caucal-{causal}_dtype-{dtype}',
+    args={'D_HEAD': D_HEAD, 'dtype': dtype, 'mode': mode, 'causal': causal}
+) for mode in ['fwd', 'bwd'] 
+    for causal in [True, False] 
+    for dtype in [torch.float16, torch.bfloat16] 
+    for D_HEAD in [64, 128]]
 
 @triton.testing.perf_report(configs)
-def bench_flash_attention(BATCH, H, N_CTX, D_HEAD, causal, mode, provider, dtype=torch.float16, device="cuda"):
+def bench_flash_attention(N_CTX, D_HEAD, causal, mode, provider, dtype=torch.float16, device="cuda"):
     assert mode in ['fwd', 'bwd']
     w = N_CTX // 2 # dist thresold
     warmup = 25
     rep = 100
+
+    BATCH = 32768 // N_CTX
+    H = 2048 // D_HEAD
     if provider == "triton":
         q1 = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
         k1 = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
