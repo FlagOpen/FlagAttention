@@ -10,6 +10,8 @@ in the training set.
 
 It takes as input two q's and two k's as inputs. The attention score is the dot product 
 of (q1, k1) or (q2, k2) depending on whether the distance between q & k exceeds a threshold.
+
+The code is adapted from triton's [tutorial](https://github.com/openai/triton/blob/5162871c6cae01a8508a309cf21a8e6b68a4c091/python/tutorials/06-fused-attention.py).
 """
 
 import torch
