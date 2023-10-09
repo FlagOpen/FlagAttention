@@ -9,17 +9,19 @@ from flag_attn.piecewise import standalone_backward as attention_grad_triton
 from flag_attn.piecewise import attention as piecewise_attn
 
 
+@pytest.mark.parametrize('device_id', list(range(torch.cuda.device_count())))
 @pytest.mark.parametrize('B, H, T, D, P_SEQ', [
     (2, 4, 1024, 32, 100), 
     (2, 4, 1024, 32, 0)])
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
-def test_attention_standalone(B, H, T, D, P_SEQ, causal, dtype):
-    q1 = torch.empty((B, H, T, D), dtype=dtype, device="cuda").normal_(mean=0., std=0.5)
-    q2 = torch.empty((B, H, T, D), dtype=dtype, device="cuda").normal_(mean=0., std=0.5)
-    k1 = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device="cuda").normal_(mean=0., std=0.5)
-    k2 = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device="cuda").normal_(mean=0., std=0.5)
-    v = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device="cuda").normal_(mean=0., std=0.5)
+def test_attention_standalone(B, H, T, D, P_SEQ, causal, dtype, device_id):
+    device = f"cuda:{device_id}"
+    q1 = torch.empty((B, H, T, D), dtype=dtype, device=device).normal_(mean=0., std=0.5)
+    q2 = torch.empty((B, H, T, D), dtype=dtype, device=device).normal_(mean=0., std=0.5)
+    k1 = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device=device).normal_(mean=0., std=0.5)
+    k2 = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device=device).normal_(mean=0., std=0.5)
+    v = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device=device).normal_(mean=0., std=0.5)
     sm_scale = 0.5
     w = 780
 
@@ -28,20 +30,22 @@ def test_attention_standalone(B, H, T, D, P_SEQ, causal, dtype):
     torch.testing.assert_close(o_hyp, o_ref, atol=1e-2, rtol=1e-3)
 
 
+@pytest.mark.parametrize('device_id', list(range(torch.cuda.device_count())))
 @pytest.mark.parametrize('B, H, T, D, P_SEQ', [
     (2, 4, 1024, 32, 100), 
     (2, 4, 1024, 32, 0)])
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
-def test_attention_grad_standalone(B, H, T, D, P_SEQ, causal, dtype):
-    q1 = torch.empty((B, H, T, D), dtype=dtype, device="cuda").normal_(mean=0., std=0.5).requires_grad_()
-    q2 = torch.empty((B, H, T, D), dtype=dtype, device="cuda").normal_(mean=0., std=0.5).requires_grad_()
-    k1 = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device="cuda").normal_(mean=0., std=0.5).requires_grad_()
-    k2 = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device="cuda").normal_(mean=0., std=0.5).requires_grad_()
-    v = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device="cuda").normal_(mean=0., std=0.5).requires_grad_()
+def test_attention_grad_standalone(B, H, T, D, P_SEQ, causal, dtype, device_id):
+    device = f"cuda:{device_id}"
+    q1 = torch.empty((B, H, T, D), dtype=dtype, device=device).normal_(mean=0., std=0.5).requires_grad_()
+    q2 = torch.empty((B, H, T, D), dtype=dtype, device=device).normal_(mean=0., std=0.5).requires_grad_()
+    k1 = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device=device).normal_(mean=0., std=0.5).requires_grad_()
+    k2 = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device=device).normal_(mean=0., std=0.5).requires_grad_()
+    v = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device=device).normal_(mean=0., std=0.5).requires_grad_()
     sm_scale = 0.5
     w = 780
-    do = torch.empty((B, H, T, D), dtype=dtype, device="cuda").normal_(mean=0., std=0.5)
+    do = torch.empty((B, H, T, D), dtype=dtype, device=device).normal_(mean=0., std=0.5)
 
     o_ref = attention_torch(q1, k1, q2, k2, v, w, causal, sm_scale)
     dq1_ref, dk1_ref, dq2_ref, dk2_ref, dv_ref = attention_grad_torch(q1, k1, q2, k2, v, w, causal, sm_scale, o_ref, do)
@@ -57,20 +61,22 @@ def test_attention_grad_standalone(B, H, T, D, P_SEQ, causal, dtype):
     torch.testing.assert_close(dk2_hyp, dk2_ref, atol=1e-2, rtol=1e-3) 
 
 
+@pytest.mark.parametrize('device_id', list(range(torch.cuda.device_count())))
 @pytest.mark.parametrize('B, H, T, D, P_SEQ', [
     (2, 4, 1024, 32, 100), 
     (2, 4, 1024, 32, 0)])
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
-def test_attention_fwd_bwd(B, H, T, D, P_SEQ, causal, dtype):
-    q1 = torch.empty((B, H, T, D), dtype=dtype, device="cuda").normal_(mean=0., std=0.5).requires_grad_()
-    q2 = torch.empty((B, H, T, D), dtype=dtype, device="cuda").normal_(mean=0., std=0.5).requires_grad_()
-    k1 = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device="cuda").normal_(mean=0., std=0.5).requires_grad_()
-    k2 = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device="cuda").normal_(mean=0., std=0.5).requires_grad_()
-    v = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device="cuda").normal_(mean=0., std=0.5).requires_grad_()
+def test_attention_fwd_bwd(B, H, T, D, P_SEQ, causal, dtype, device_id):
+    device = f"cuda:{device_id}"
+    q1 = torch.empty((B, H, T, D), dtype=dtype, device=device).normal_(mean=0., std=0.5).requires_grad_()
+    q2 = torch.empty((B, H, T, D), dtype=dtype, device=device).normal_(mean=0., std=0.5).requires_grad_()
+    k1 = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device=device).normal_(mean=0., std=0.5).requires_grad_()
+    k2 = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device=device).normal_(mean=0., std=0.5).requires_grad_()
+    v = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device=device).normal_(mean=0., std=0.5).requires_grad_()
     sm_scale = 0.5
     w = 780
-    do = torch.empty((B, H, T, D), dtype=dtype, device="cuda").normal_(mean=0., std=0.5)
+    do = torch.empty((B, H, T, D), dtype=dtype, device=device).normal_(mean=0., std=0.5)
 
     o_ref = attention_torch(q1, k1, q2, k2, v, w, causal, sm_scale)
     o_ref.backward(do)
