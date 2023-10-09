@@ -1,7 +1,10 @@
 import torch
 import pytest
 
-def attention(q1, k1, q2, k2, v, w, causal, sm_scale):
+def attention(q1, k1, q2, k2, v, w, causal, sm_scale, upcast=False):
+    input_dtype = q1.dtype
+    if upcast:
+        q1, k1, q2, k2, v = q1.float(), k1.float(), q2.float(), k2.float(), v.float()
     # (B, H, T, D)
     kv_seq_len = k1.shape[-2]
     q_seq_len = q1.shape[-2]
@@ -22,9 +25,13 @@ def attention(q1, k1, q2, k2, v, w, causal, sm_scale):
     # upcast attention to fp32
     P = torch.softmax(S, dim=-1, dtype=torch.float32).to(v.dtype)
     attn_output = torch.matmul(P, v)
-    return attn_output
+    return attn_output.to(input_dtype)
 
-def attention_grad(q1, k1, q2, k2, v, w, causal, sm_scale, o, do):
+def attention_grad(q1, k1, q2, k2, v, w, causal, sm_scale, o, do, upcast=False):
+    input_dtype = q1.dtype
+
+    if upcast:
+        q1, k1, q2, k2, v, o, do = [item.float() for item in [q1, k1, q2, k2, v, o, do]]
     kv_seq_len = k1.shape[-2]
     q_seq_len = q1.shape[-2]
     p_seq = kv_seq_len - q_seq_len
@@ -60,6 +67,8 @@ def attention_grad(q1, k1, q2, k2, v, w, causal, sm_scale, o, do):
 
     dq2 = torch.matmul(dS2, k2)
     dk2 = torch.matmul(dS2.transpose(2, 3), q2)
+
+    dq1, dk1, dq2, dk2, dv = [item.to(input_dtype) for item in [dq1, dk1, dq2, dk2, dv]]
     return dq1, dk1, dq2, dk2, dv
 
 @pytest.mark.parametrize('B, H, T, D, P_SEQ', [(2, 3, 1024, 32, 100), (2, 3, 1024, 32, 0)])
