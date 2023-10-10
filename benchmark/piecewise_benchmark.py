@@ -1,9 +1,18 @@
 import math
+import logging
 import pathlib
 import torch
 import triton
 
 from flag_attn import piecewise_attn
+
+import sys
+path_to_test = pathlib.Path(__file__).parent.parent / "tests" / "flag_attn" 
+print(path_to_test.absolute())
+sys.path.append(str(path_to_test.absolute()))
+from ref_impl.piecewise import attention as piecewise_attn_torch
+
+
 
 try:
     from flash_attn.flash_attn_interface import \
@@ -22,14 +31,14 @@ configs = [triton.testing.Benchmark(
     x_names=['N_CTX'],
     x_vals=[2**i for i in range(9, 16)],
     line_arg='provider',
-    line_vals=['triton', ] + (['flash'] if HAS_FLASH else []),
-    line_names=['triton', ] + ([f'flash-{FLASH_VER}'] if HAS_FLASH else []),
-    styles=[('red', '-'), ('green', '-')],
+    line_vals=['triton', 'torch'] + (['flash'] if HAS_FLASH else []),
+    line_names=['triton', 'torch'] + ([f'flash-{FLASH_VER}'] if HAS_FLASH else []),
+    styles=[('red', '-'), ('green', '-'), ('blue', '-')],
     ylabel='tflop/s',
     plot_name=f'piecewise_attention_d-{D_HEAD}_mode-{mode}_caucal-{causal}_dtype-{dtype}',
     args={'D_HEAD': D_HEAD, 'dtype': dtype, 'mode': mode, 'causal': causal}
 ) for mode in ['fwd', 'bwd'] 
-    for causal in [True, False] 
+    for causal in [False, True] 
     for dtype in [torch.float16, torch.bfloat16] 
     for D_HEAD in [64, 128]]
 
@@ -55,6 +64,24 @@ def bench_flash_attention(N_CTX, D_HEAD, causal, mode, provider, dtype=torch.flo
             do = torch.randn_like(o)
             fn = lambda: o.backward(do, retain_graph=True)
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
+    if provider == "torch":
+        q1 = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
+        k1 = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
+        q2 = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
+        k2 = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
+        v = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
+        sm_scale = 1. / math.sqrt(D_HEAD)
+
+        try:
+            fn = lambda: piecewise_attn_torch(q1, k1, q2, k2, v, w, causal, sm_scale)
+            if mode == 'bwd':
+                o = fn()
+                do = torch.randn_like(o)
+                fn = lambda: o.backward(do, retain_graph=True)
+            ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
+        except torch.cuda.OutOfMemoryError as e:
+            logging.info(f"torch OOM for batch_size: {BATCH}, num_heads: {H}, seqlen: {N_CTX}, headdim: {D_HEAD}")
+            ms = float("inf")
     if provider == "flash":
         qkv = torch.randn((BATCH, N_CTX, 3, H, D_HEAD), dtype=dtype, device=device, requires_grad=True)
         if FLASH_VER == 1:
