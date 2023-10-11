@@ -1,6 +1,12 @@
 # FlagAttention
 
+[English](./README.md)
+
 FlagAttention 是一个用 Triton 语言实现的内存高效 Attention 算子项目。Flag Attention 受到 [FlashAttention](https://arxiv.org/abs/2205.14135) 和 [FlahAttention v2](https://tridao.me/publications/flash2/flash2.pdf) 的启发，并从大型语言建模研究的具体需求出发扩展它的功能。FlashAttention 和 FlashAttention-2 可以节省内存占用和访存以提高内存效率，但要对它们进行修改，添加更多选项和功能，则需要熟练的 cuda 编程技能。因此，Flag Attention 使用 Triton 来语言实现，它更便于编写自定义 GPU kernel。
+
+FlagAttention 提供的算子具有和 FlashAttention 相似的访存高效，运行速度快的特点，可以支持大语言模型在长文本上的训练和推理。作为开箱即用的高效 Attention 算子库，FlagAttention 寻求高效和泛用性之间的平衡点。对基础功能进行扩展，而不是针对某个特定模型为其定义所有细节。目前其中的 PiecewiseAttention 用于 Aquila 33B 模型的推理，但这个算子也可以用于其他模型。
+
+如果需要更多的定制和修改，FlagAttention 中的算子实现也可以作为参考或修改的起点。
 
 ## 安装
 
@@ -63,8 +69,11 @@ pytest .
 
 ## 运行性能测试
 
-项目中提供了性能基准测试来衡量算子所能达到的的 TFLOPs/s。由于 FlagAttention 中的算子和 FlashAttention 有一定差别，因此即使批量大小、序列长度、头部数量、头部尺寸和其他配置相同，计算总量也会有所不同。衡量算子的浮点数运算总量 (FLOPs) 时，仅计算矩阵乘。总计算量除以运行时间的中位数，得到算子运行的 FLOPs/s。
+项目中提供了性能基准测试来衡量算子所能达到的的 TFLOPs/s。FLOPs/s 用来作为衡量算子运行速度的指标。算子的浮点数运算总量 (FLOPs) 时，仅计算矩阵乘。总计算量除以运行时间的中位数，得到算子运行的 FLOPs/s。
 
+我们对比了算子的 Triton 实现和 pytorch 参考实现的性能。当输入规模较大时，pytorch 参考实现会遇到内存不足的问题，这种情况下，FLOPs/s 记为 0.
+
+我们也提供在相同输入规模下的 `Flash Attention v2` (https://github.com/Dao-AILab/flash-attention, v2.2.3) 的速度作为性能参考。但由于 FlagAttention 中的算子和 FlashAttention 有一定差别，因此即使批量大小、序列长度、头部数量、头部尺寸和其他配置相同，计算总量也会有所不同。
 
 ## 算子
 
@@ -78,20 +87,57 @@ pytest .
 piecewise_attention(q1, k1, q2, k2, v, dist_threshold, softmax_scale=None, causal=False)
 ```
 
-它被命名为 piecewise_attention (分段 attention)，因为在通过 softmax 得到 attention weights (P) 之前，它需要两个`q` 和两个 `k` 来计算 attention score (S)。这样的设计源于这样一个具有旋转位置嵌入的 Transformer 不擅长预测比训练集中更长的序列。当距离大于训练集中的最大序列长度时，这样的 (q,k) 对会得到较高的 attention score，这是出乎意料的现象。为了解决这个问题，一种方式是设定一个距离阈值，根据取 `q` 和 `k` 之间的距离是否大于阈值，以不同的方式计算 attention score。
+它被命名为 piecewise_attention (分段 attention)，因为在通过 softmax 得到 attention weights (P) 之前，它需要两个`q` 和两个 `k` 来计算 attention score (S)。这样的设计源于这样具有旋转位置嵌入的 Transformer 不擅长预测比训练集中更长的序列。当距离大于训练集中的最大序列长度时，这样的 (q,k) 对会得到较高的 attention score，这是不符合预期的现象。解决这个问题的一种方式是设定一个距离阈值，根据取 `q` 和 `k` 之间的距离是否大于阈值，以不同的方式计算 attention score。
 
 在实践中，可以先对 `q` 和 `k`用两种不同的方式进行预处理，以获得 `q1, q2` 和 `k1, k2`。然后，根据取 `q` 和 `k` 之间的距离是否大于阈值，选择使用 `q1, k1` 或者 `q2, k2` 计算内积。
 
 ![piecewise attention](assets/piecewise_attention.png)
 
-特征：
+#### 使用示例
 
-- K/V 的序列长度可以大于 Q 的序列长度；
-- 数据类型支持，Ampere Nvidia GPU 上支持 float16 和 bfloat16；
-- 支持 causal 和 causal 模式；
-- 支持前向和反向计算。
+```python
+from flag_attn import piecewise_attn
 
-局限:
+B, H, T, D = 2, 16, 8192, 128
+sm_scale = 1. / math.sqrt(D)
+dist_threshold = T // 2
+
+q1 = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0")
+q2 = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0")
+k1 = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0")
+k2 = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0")
+v = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0")
+o = piecewise_attn(q1, k1, q2, k2, v, dist_threshold, causal=True, sm_scale=sm_scale)
+print(o)
+```
+
+#### 性能
+
+下面展示 A100 上使用 causal 模式的 piecewise_attention 的正向和反向算子的性能。测试参数如下：
+
+1. seqlen 为 512, 1k, 2k, 4k, 16k, 32k;
+2. batch size 为 32k / seqlen;
+3. headdim 为 64, 128；
+4. num_heads 为 2048 / headdim.
+
+Headdim=64
+![headdim64, A100, causal](./assets/headdim64-causal-A100.png)
+
+---
+
+Headdim=128
+![headdim128, A100, causal](./assets/headdim128-causal-A100.png)
+
+#### 特征
+
+- 支持[英伟达](https://www.nvidia.com/) 安培架构的 GPU(在 RTX-3090, A100 上验证)；
+- 支持[天数智芯](https://www.iluvatar.com/)的 GPU(在 MR-V100 上验证)；
+- 数据类型支持，float16, 在英伟达安培架构 GPU 上也支持 bfloat16；
+- 支持 causal 和非 causal 模式；
+- 支持前向和反向计算；
+- K/V 的序列长度可以大于 Q 的序列长度。
+
+#### 限制
 
 - headdim 必须为 `[16, 32, 64, 128]` 之一；
 - 尚未支持对 attention weight 使用 dropout。

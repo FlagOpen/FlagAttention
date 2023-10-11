@@ -1,14 +1,20 @@
 # FlagAttention
 
+[中文版](./README_cn.md)
+
 FlagAttention is a project for memory-efficient attention operators implemented in the Triton language. It is inspired by [FlashAttention](https://arxiv.org/abs/2205.14135) and [FlahAttention v2](https://tridao.me/publications/flash2/flash2.pdf) and extends them to satisfy the needs for research on large language modeling. FlashAttention and FlashAttention-2 save memory footprint and traffic to improve memory efficiency, but to modify them and add more options and functionalities requires precision in cuda programming. Thus, Flag Attention is implemented in the Triton language, which is easier to use to write custom GPU kernels.
+
+The operators provided by FlagAttention is memory-efficient and fasts fast, like FlashAttention, which scales large language models to longer sequences. As a out-of-the-box collection of efficient  attention operators, FlagAttention balances efficiency and generality. FlagAttention makes extensions to the basic functionalites rather than tailor an operaor for every detail of a specific model. PiecewiseAttention is currently used for inference in the Aquila 33B model, but it can also be used by other models.
+
+When further customization is needed, FlagAttention can also a reference or starting point.
 
 ## Installation
 
 ## Requirements
 
-FlagAttention requires Torch and Triton. To use new features of Triton, Triton nightly is recommended.
+FlagAttention requires Pytorch and Triton. To use new features of Triton, Triton nightly is recommended.
 
-Instructions for installing Torch nightly can be found at https://pytorch.org/get-started/locally/ . Triton is now a dependency of torch nightly, so it can be installed automatically.
+Instructions to install Pytorch nightly can be found at https://pytorch.org/get-started/locally/ . Triton is now a dependency of torch nightly, so it can be installed automatically.
 
 FlagAttention requires Ampere Nvidia GPUs(e.g. A100, RTX-3090, ...) and CUDA Toolkit 11.6 and above. Other GPUs may work but not been tested yet.
 
@@ -63,7 +69,11 @@ pytest .
 
 ## Run the Benchmark
 
-Benchmarks are provided to measure the TFLOPs/s achieved. Since operators in `FlagAttention` deviates from Flash Attention, the total amount of computation is different even when batch size, sequence length, number of heads, head dimension, and other configurations are the same. To calculate the FLOPs of an operator, only matmuls are counted. The FLOPs is divided by the median runtime to get the achieved FLOPs/s.
+Benchmarks are provided to measure the TFLOPs/s achieved. FLOPs/s is used as a metric for speed of the operator. To calculate the FLOPs of an operator, only matmuls are counted. The FLOPs is divided by the median runtime to get the achieved FLOPs/s.
+
+We benchmark operators in Triton implemention against a reference implementation in Pytorch. When the input size is large, the reference implementation in Pytorch runs out of memory. In such cases, the FLOP/s is treated as zero.
+
+The speed of `Flash Attention v2` (https://github.com/Dao-AILab/flash-attention, v2.2.3) with the same size of inputs is also provided as a reference. But since operators in `FlagAttention` deviates from Flash Attention, the total amount of computation is different even when batch size, sequence length, number of heads, head dimension, and other configurations are the same. 
 
 ## Operators
 
@@ -83,14 +93,51 @@ In practice, `q` and `k` can be preprocessed in two different ways to get `q1, q
 
 ![piecewise attention](assets/piecewise_attention.png)
 
-Features:
+#### Usage
 
-- the sequence length of k/v can be larger than that of q;
+```python
+from flag_attn import piecewise_attn
+
+B, H, T, D = 2, 16, 8192, 128
+sm_scale = 1. / math.sqrt(D)
+dist_threshold = T // 2
+
+q1 = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0")
+q2 = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0")
+k1 = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0")
+k2 = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0")
+v = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0")
+o = piecewise_attn(q1, k1, q2, k2, v, dist_threshold, causal=True, sm_scale=sm_scale)
+print(o)
+```
+
+#### Performance
+
+Performace for piecewise_attention with causal masking on A100 is show below. Testing parameters are
+
+1. seqlen in `[512, 1k, 2k, 4k, 16k, 32k]`;
+2. batch size: `32k / seqlen`;
+3. headdim in`[64, 128]`；
+4. num_heads: 2048 / headdim.
+
+Headdim=64
+![headdim64, A100, causal](./assets/headdim64-causal-A100.png)
+
+---
+
+Headdim=128
+![headdim128, A100, causal](./assets/headdim128-causal-A100.png)
+
+#### Features
+
+- support for [Nvidia](https://www.nvidia.com/) Ampere GPU(Tested on RTX-3090 and A100)；
+- support for [Iluvatar CoreX](https://www.iluvatar.com/) GPU(在 MR-V100 上验证)；
 - data type support, float16 and bfloat16 for Ampere Nvidia GPUs;
 - support causal and non-causal modes.
-- support forward & backward modes.
+- support forward & backward modes;
+- the sequence length of k/v can be larger than that of q.
 
-Limitations:
+#### Limitations
 
 - headdim should be in `[16, 32, 64, 128]`.
 - dropout of attention weights is not supported yet.
