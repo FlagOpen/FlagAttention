@@ -38,7 +38,7 @@ configs = [triton.testing.Benchmark(
     plot_name=f'piecewise_attention_d-{D_HEAD}_mode-{mode}_caucal-{causal}_dtype-{dtype}',
     args={'D_HEAD': D_HEAD, 'dtype': dtype, 'mode': mode, 'causal': causal}
 ) for mode in ['fwd', 'bwd'] 
-    for causal in [False, True] 
+    for causal in [False, True]
     for dtype in [torch.float16, torch.bfloat16] 
     for D_HEAD in [64, 128]]
 
