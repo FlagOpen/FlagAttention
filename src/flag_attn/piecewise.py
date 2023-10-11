@@ -66,25 +66,33 @@ class PiecewiseAttention(torch.autograd.Function):
         return dq1, dk1, dq2, dk2, dv, None, None, None
 
 def standalone_forward(q1, k1, q2, k2, v, w, causal, sm_scale):
+    # to work around https://github.com/openai/triton/issues/2441
+    orginal_device_index = torch.cuda.current_device()
+    device_index = q1.device.index
+    torch.cuda.set_device(device_index)
+
     # shape constraints
     Dq1, Dk1, Dq2, Dk2, Dv = q1.shape[-1], k1.shape[-1], q2.shape[-1], k2.shape[-1], v.shape[-1]
     assert Dq1 == Dk1 == Dq2 == Dk2 == Dv
     assert Dk1 in {16, 32, 64, 128}
     o = torch.empty_like(q1)
-    BLOCK_M = 128
-    BLOCK_N = 64
-
-    # piecewise attention use more shm than flash attention
-    num_stages = 3 if Dk1 <=64 else 1
-    num_warps = 4 if Dk1 <=64 else 8
+    
+        # tune for A100, device_capability(8, 0)
+    if torch.cuda.get_device_capability(device_index) == (8, 0): 
+        BLOCK_M = 128
+        BLOCK_N = 64
+        # piecewise attention use more shm than flash attention
+        num_stages = 3 if Dk1 <=64 else 1
+        num_warps = 4 if Dk1 <=64 else 8
+    else: # tune for RTX-3090, device_capability(8, 6)
+        BLOCK_M = 128 if Dk1 <=64 else 64
+        BLOCK_N = 64
+        # piecewise attention use more shm than flash attention
+        num_stages = 2
+        num_warps = 4
 
     B, H, M, D = q1.shape
     N = k1.shape[2]
-
-    # to work around https://github.com/openai/triton/issues/2441
-    orginal_device_index = torch.cuda.current_device()
-    device_index = q1.device.index
-    torch.cuda.set_device(device_index)
 
     grid = (triton.cdiv(M, BLOCK_M), B * H, 1)
     L = torch.empty((B * H, M), device=q1.device, dtype=torch.float32)
@@ -109,22 +117,29 @@ def standalone_forward(q1, k1, q2, k2, v, w, causal, sm_scale):
     return o, L
 
 def standalone_backward(q1, k1, q2, k2, v, w, causal, sm_scale, o, L, do):
+    # to work around https://github.com/openai/triton/issues/2441
+    orginal_device_index = torch.cuda.current_device()
+    device_index = q1.device.index
+    torch.cuda.set_device(device_index)
+
     B, H, M, D = q1.shape
 
-    BLOCK_M = 64 if D<=64 else 128 
-    BLOCK_N = 64
-    num_stages = 1
-    num_warps = 4 if D <=64 else 8 
+    # tune for A100, device_capability(8, 0)
+    if torch.cuda.get_device_capability(device_index) == (8, 0): 
+        BLOCK_M = 64 if D<=64 else 128 
+        BLOCK_N = 64
+        num_stages = 1
+        num_warps = 4 if D <=64 else 8 
+    else: # tune for RTX-3090, device_capability(8, 6)
+        BLOCK_M = 64
+        BLOCK_N = 64 if D <=64 else 32
+        num_stages = 1
+        num_warps = 4
 
     N = k1.shape[2]
     P_SEQ = N - M
     is_fp16 = q1.dtype is torch.float16
     do = do.contiguous()
-    
-    # to work around https://github.com/openai/triton/issues/2441
-    orginal_device_index = torch.cuda.current_device()
-    device_index = q1.device.index
-    torch.cuda.set_device(device_index)
 
     delta = torch.empty_like(L)
     _bwd_preprocess[(triton.cdiv(M, BLOCK_M) * B * H, 1, 1)](
@@ -404,13 +419,13 @@ def _bwd_kv_kernel(
     k2 = tl.load(k2_ptrs, mask=mask_n[None, :])
 
     # Dot I trick(only effective for fp16)
-    if IS_FP16:
-    # better way to generate a eye matrix. avoid casting
-        I = tl.where(offs_k[:, None] == offs_k, 
-                    tl.full((BLOCK_DMODEL, BLOCK_DMODEL), 1.0, dtype=input_dtype), 
-                    tl.full((BLOCK_DMODEL, BLOCK_DMODEL), 0.0, dtype=input_dtype))
-        k1 = tl.dot(I, k1).to(input_dtype)
-        k2 = tl.dot(I, k2).to(input_dtype)
+    # if IS_FP16:
+    #     # better way to generate a eye matrix. avoid casting
+    #     I = tl.where(offs_k[:, None] == offs_k, 
+    #                 tl.full((BLOCK_DMODEL, BLOCK_DMODEL), 1.0, dtype=input_dtype), 
+    #                 tl.full((BLOCK_DMODEL, BLOCK_DMODEL), 0.0, dtype=input_dtype))
+    #     k1 = tl.dot(I, k1).to(input_dtype)
+    #     k2 = tl.dot(I, k2).to(input_dtype)
 
     # initialize dk amd dv
     dk1 = tl.zeros([BLOCK_N, BLOCK_DMODEL], dtype=tl.float32)
@@ -546,12 +561,12 @@ def _bwd_q_kernel(
 
     # Dot I trick
     # if IS_FP16:
-    # better way to generate a eye matrix. avoid casting
-    I = tl.where(offs_k[:, None] == offs_k, 
-                tl.full((BLOCK_DMODEL, BLOCK_DMODEL), 1.0, dtype=input_dtype), 
-                tl.full((BLOCK_DMODEL, BLOCK_DMODEL), 0.0, dtype=input_dtype))
-    q1 = tl.dot(q1, I).to(input_dtype)
-    q2 = tl.dot(q2, I).to(input_dtype)
+    #     # better way to generate a eye matrix. avoid casting
+    #     I = tl.where(offs_k[:, None] == offs_k, 
+    #                 tl.full((BLOCK_DMODEL, BLOCK_DMODEL), 1.0, dtype=input_dtype), 
+    #                 tl.full((BLOCK_DMODEL, BLOCK_DMODEL), 0.0, dtype=input_dtype))
+    #     q1 = tl.dot(q1, I).to(input_dtype)
+    #     q2 = tl.dot(q2, I).to(input_dtype)
 
     # initialize dq 
     dq1 = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)

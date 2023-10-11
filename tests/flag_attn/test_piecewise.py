@@ -15,10 +15,12 @@ def max_diff(a, b):
 @pytest.mark.parametrize('device_id', list(range(torch.cuda.device_count())))
 @pytest.mark.parametrize('scale', [1.0, 2.0, 3.0, 4.0])
 @pytest.mark.parametrize('B, H, T, D, P_SEQ', [
-    (2, 4, 1024, 32, 100), 
-    (2, 4, 1024, 128, 0),
-    (2, 4, 8192, 128, 0),
-    (2, 16, 8192, 128, 10)
+    (2, 4, 512, 128, 100),
+    (2, 4, 1024, 64, 10), 
+    (2, 4, 2048, 32, 0),
+    (2, 4, 4096, 16, 0),
+    (1, 2, 8192, 16, 0),
+    (1, 2, 8192, 32, 0),
 ])
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
@@ -33,7 +35,7 @@ def test_attention_standalone(B, H, T, D, P_SEQ, causal, dtype, scale, device_id
     w = 780
 
     o_ref = attention_torch(q1, k1, q2, k2, v, w, causal, sm_scale, upcast=True)
-    o_torch, _ = attention_torch(q1, k1, q2, k2, v, w, causal, sm_scale)
+    o_torch = attention_torch(q1, k1, q2, k2, v, w, causal, sm_scale)
     o_hyp, _ = attention_triton(q1, k1, q2, k2, v, w, causal, sm_scale)
     
 
@@ -46,9 +48,12 @@ def test_attention_standalone(B, H, T, D, P_SEQ, causal, dtype, scale, device_id
 @pytest.mark.parametrize('device_id', list(range(torch.cuda.device_count())))
 @pytest.mark.parametrize('scale', [1.0, 2.0, 3.0, 4.0])
 @pytest.mark.parametrize('B, H, T, D, P_SEQ', [
-    (2, 4, 1024, 32, 100), 
-    (2, 4, 1024, 128, 0),
-    (2, 4, 8192, 128, 0),
+    (2, 4, 512, 128, 100),
+    (2, 4, 1024, 64, 10), 
+    (2, 4, 2048, 32, 0),
+    (2, 4, 4096, 16, 0),
+    (1, 2, 8192, 16, 0),
+    (1, 2, 8192, 32, 0),
 ])
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
@@ -100,10 +105,12 @@ def test_attention_grad_standalone(B, H, T, D, P_SEQ, causal, dtype, scale, devi
 @pytest.mark.parametrize('device_id', list(range(torch.cuda.device_count())))
 @pytest.mark.parametrize('scale', [1.0, 2.0, 3.0, 4.0])
 @pytest.mark.parametrize('B, H, T, D, P_SEQ', [
-    (2, 4, 1024, 32, 100), 
-    (2, 4, 1024, 128, 0),
-    (2, 4, 8192, 128, 0),
-    (2, 16, 8192, 128, 10)
+    (2, 4, 512, 128, 100),
+    (2, 4, 1024, 64, 10), 
+    (2, 4, 2048, 32, 0),
+    (2, 4, 4096, 16, 0),
+    (1, 2, 8192, 16, 0),
+    (1, 2, 8192, 32, 0),
 ])
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
