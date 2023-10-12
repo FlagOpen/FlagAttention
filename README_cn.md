@@ -61,7 +61,13 @@ FlagAttention 提供了自定义的 attention 算子。当一个算子的功能�
 
 ## 运行测试
 
-需要较新版本的 `pytest`(>=7.1.0) 以运行 `tests/` 中的测试。FlagAttention 中的运算符针对 PyTorch 中的[参考实现](tests/flag_attn/ref_impl/) 进行测试，包括前向和反向。对于 `float16` 和 `bfloat16`，我们将绝对公差和相对公差设置为 `1e-2` 和 `1e-3`。
+需要较新版本的 `pytest`(>=7.1.0) 以运行 `tests/` 中的测试。FlagAttention 中的运算符针对 PyTorch 中的[参考实现](tests/flag_attn/ref_impl/) 进行测试，包括前向和反向。对于支持 `float16` 和 `bfloat16` 数据类型的算子，测试中包含了三种实现用于对比。
+
+1. 作为参考的是高精度的 PyTorch 实现 (下面称为 reference 实现) 。输入被转换为 `float32` 类型进行运算，再将结果转换为 `float16` 或 `bfloat16` 类型。
+2. 算子的 Triton 实现一般使用 `float16` 或 `bfloat16` 作为矩阵乘(mma)的输入类型，而使用 float32 作为矩阵乘的输出类型，以及其他运算的计算类型。
+3. 用于对比的实现是与 reference 逻辑相同的 PyTorch 实现，但计算精度和 Triton 实现一致。
+
+我们的测试要求在相同情况下，Triton 实现与 reference 实现之间的最大误差不大于 Pytorch 低精度实现与 reference 实现之间最大误差的两倍。
 
 ```sh
 pytest .
