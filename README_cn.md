@@ -4,7 +4,7 @@
 
 FlagAttention 是一个用 Triton 语言实现的内存高效 Attention 算子项目。FlagAttention 受到 [FlashAttention](https://arxiv.org/abs/2205.14135) 和 [FlashAttention v2](https://tridao.me/publications/flash2/flash2.pdf) 的启发，并从大型语言建模研究的具体需求出发扩展它的功能。FlashAttention 和 FlashAttention-2 可以节省内存占用和访存以提高内存效率，但要对它们进行修改，添加更多选项和功能，则需要熟练的 cuda 编程技能。因此，FlagAttention 使用 Triton 来语言实现，它更便于编写自定义 GPU kernel。
 
-FlagAttention 提供的算子具有和 FlashAttention 相似的访存高效、运行速度快的特点，可以支持大语言模型在长文本上的训练和推理。作为开箱即用的高效 Attention 算子库，FlagAttention 寻求高效和泛用性之间的平衡点，对基础功能进行扩展，而不是针对某个特定模型为其定义所有细节。目前其中的 PiecewiseAttention 用于 [Aquila 33B](https://github.com/FlagAI-Open/Aquila2) 模型的推理，但这个算子也可以用于其他模型。
+FlagAttention 提供的算子具有和 FlashAttention 相似的访存高效、运行速度快的特点，可以支持大语言模型在长文本上的训练和推理。作为开箱即用的高效 Attention 算子库，FlagAttention 寻求高效和泛用性之间的平衡点，对基础功能进行扩展，而不是针对某个特定模型为其定义所有细节。目前其中的 PiecewiseAttention 用于 [Aquila 34B](https://github.com/FlagAI-Open/Aquila2) 模型的推理，但这个算子也可以用于其他模型。
 
 如果需要更多的定制和修改，FlagAttention 中的算子实现也可以作为参考或修改的起点。
 
