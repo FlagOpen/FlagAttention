@@ -31,11 +31,11 @@ configs = [triton.testing.Benchmark(
     x_names=['N_CTX'],
     x_vals=[2**i for i in range(9, 16)],
     line_arg='provider',
-    line_vals=['triton', 'torch'] + (['flash'] if HAS_FLASH else []),
-    line_names=['triton', 'torch'] + ([f'flash-{FLASH_VER}'] if HAS_FLASH else []),
+    line_vals=['piecewise', 'torch'] + (['flash'] if HAS_FLASH else []),
+    line_names=['piecewise', 'torch'] + ([f'flash-{FLASH_VER}'] if HAS_FLASH else []),
     styles=[('red', '-'), ('green', '-'), ('blue', '-')],
     ylabel='tflop/s',
-    plot_name=f'piecewise_attention_d-{D_HEAD}_mode-{mode}_caucal-{causal}_dtype-{dtype}',
+    plot_name=f'piecewise_attention_d-{D_HEAD}_mode-{mode}_causal-{causal}_dtype-{dtype}',
     args={'D_HEAD': D_HEAD, 'dtype': dtype, 'mode': mode, 'causal': causal}
 ) for mode in ['fwd', 'bwd'] 
     for causal in [False, True]

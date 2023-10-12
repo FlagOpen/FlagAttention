@@ -2,13 +2,11 @@
 
 [中文版](./README_cn.md)
 
-FlagAttention is a project for memory-efficient attention operators implemented in the Triton language. It is inspired by [FlashAttention](https://arxiv.org/abs/2205.14135) and [FlahAttention v2](https://tridao.me/publications/flash2/flash2.pdf) and extends them to satisfy the needs for research on large language modeling. FlashAttention and FlashAttention-2 save memory footprint and traffic to improve memory efficiency, but to modify them and add more options and functionalities requires precision in cuda programming. Thus, Flag Attention is implemented in the Triton language, which is easier to use to write custom GPU kernels.
+FlagAttention is a project for memory-efficient attention operators implemented in the Triton language. It is inspired by [FlashAttention](https://arxiv.org/abs/2205.14135) and [FlashAttention v2](https://tridao.me/publications/flash2/flash2.pdf) and extends them to satisfy the needs for research on large language modeling. FlashAttention and FlashAttention-2 save memory footprint and traffic to improve memory efficiency, but to modify them and add more options and functionalities requires precision in cuda programming. Thus, Flag Attention is implemented in the Triton language, which is easier to use to write custom GPU kernels.
 
-The operators provided by FlagAttention is memory-efficient and fasts fast, like FlashAttention, which scales large language models to longer sequences. As a out-of-the-box collection of efficient  attention operators, FlagAttention balances efficiency and generality. FlagAttention makes extensions to the basic functionalites rather than tailor an operaor for every detail of a specific model. PiecewiseAttention is currently used for inference in the Aquila 33B model, but it can also be used by other models.
+The operators provided by FlagAttention is memory-efficient and fasts fast, like FlashAttention, which scales large language models to longer sequences. As a out-of-the-box collection of efficient  attention operators, FlagAttention balances efficiency and generality. FlagAttention makes extensions to the basic functionalities rather than tailor an operator for every detail of a specific model. PiecewiseAttention is currently used for inference in the [Aquila 33B](https://github.com/FlagAI-Open/Aquila2) model, but it can also be used by other models.
 
 When further customization is needed, FlagAttention can also a reference or starting point.
-
-## Installation
 
 ## Requirements
 
@@ -18,9 +16,11 @@ Instructions to install Pytorch nightly can be found at https://pytorch.org/get-
 
 FlagAttention requires Ampere Nvidia GPUs(e.g. A100, RTX-3090, ...) and CUDA Toolkit 11.6 and above. Other GPUs may work but not been tested yet.
 
+## Installation
+
 FlagAttention can be installed in either way below.
 
-1. Editable Installation. This includes tests and benchmarks. Changes to the code in local source tree are effective without re-installation.
+1. Editable Installation. Changes to the code in local source tree are effective without re-installation.
 2. Build a distribution and then install. Only the package is installed.
 
 ### Editable Installation
@@ -69,9 +69,9 @@ pytest .
 
 ## Run the Benchmark
 
-Benchmarks are provided to measure the TFLOPs/s achieved. FLOPs/s is used as a metric for speed of the operator. To calculate the FLOPs of an operator, only matmuls are counted. The FLOPs is divided by the median runtime to get the achieved FLOPs/s.
+Benchmarks are provided to measure the TFLOPs/s achieved. FLOPs/s is used as a metric for speed of the operator. To calculate the FLOPs of an operator, only matmul is counted. The FLOPs is divided by the median runtime to get the achieved FLOPs/s.
 
-We benchmark operators in Triton implemention against a reference implementation in Pytorch. When the input size is large, the reference implementation in Pytorch runs out of memory. In such cases, the FLOP/s is treated as zero.
+We benchmark operators in Triton implementation against a reference implementation in Pytorch. When the input size is large, the reference implementation in Pytorch runs out of memory. In such cases, the FLOP/s is treated as zero.
 
 The speed of `Flash Attention v2` (https://github.com/Dao-AILab/flash-attention, v2.2.3) with the same size of inputs is also provided as a reference. But since operators in `FlagAttention` deviates from Flash Attention, the total amount of computation is different even when batch size, sequence length, number of heads, head dimension, and other configurations are the same. 
 
@@ -87,7 +87,7 @@ The interface is show below.
 piecewise_attention(q1, k1, q2, k2, v, dist_threshold, softmax_scale=None, causal=False)
 ```
 
-It is named `piecewise_attention` in that it takes two `q`'s and two `k`'s to compute attention scores (S) before applying softmax to get the attention weights (P). The design originates from the fact that a transformer with rotary position embedding is not good at predicting sequences longer than the longest sequence that it is trained on. Pair of (q, k) gets unexpectedly high attention scores when the distance is greater the max sequence length in traing set. A proposal to solve the problem is to compute the attention score in different ways, depending on whether the distance between `q` and `k` is greater than a threshold.
+It is named `piecewise_attention` in that it takes two `q`'s and two `k`'s to compute attention scores (S) before applying softmax to get the attention weights (P). The design originates from the fact that a transformer with rotary position embedding is not good at predicting sequences longer than the longest sequence that it is trained on. Pair of (q, k) gets unexpectedly high attention scores when the distance is greater the max sequence length in training set. A proposal to solve the problem is to compute the attention score in different ways, depending on whether the distance between `q` and `k` is greater than a threshold.
 
 In practice, `q` and `k` can be preprocessed in two different ways to get `q1, q2` and `k1, k2`. Then then attention score is computed as the dot product of `q1, k1` or `q2, k2` depending on the distance between `q` and `k`.
 
@@ -113,7 +113,7 @@ print(o)
 
 #### Performance
 
-Performace for piecewise_attention with causal masking on A100 is show below. Testing parameters are
+Performance for piecewise_attention with causal masking on A100 is show below. Testing parameters are
 
 1. seqlen in `[512, 1k, 2k, 4k, 16k, 32k]`;
 2. batch size: `32k / seqlen`;
@@ -131,7 +131,7 @@ Headdim=128
 #### Features
 
 - support for [Nvidia](https://www.nvidia.com/) Ampere GPU(Tested on RTX-3090 and A100)；
-- support for [Iluvatar CoreX](https://www.iluvatar.com/) GPU(在 MR-V100 上验证)；
+- support for [Iluvatar CoreX](https://www.iluvatar.com/) GPU(Tested on Iluvatar CoreX MR-V100)；
 - data type support, float16 and bfloat16 for Ampere Nvidia GPUs;
 - support causal and non-causal modes.
 - support forward & backward modes;
