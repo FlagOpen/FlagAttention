@@ -102,19 +102,25 @@ piecewise_attention(q1, k1, q2, k2, v, dist_threshold, softmax_scale=None, causa
 #### 使用示例
 
 ```python
+import torch
 from flag_attn import piecewise_attn
 
 B, H, T, D = 2, 16, 8192, 128
-sm_scale = 1. / math.sqrt(D)
 dist_threshold = T // 2
 
-q1 = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0")
-q2 = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0")
-k1 = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0")
-k2 = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0")
-v = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0")
-o = piecewise_attn(q1, k1, q2, k2, v, dist_threshold, causal=True, sm_scale=sm_scale)
+q1 = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0").requires_grad_()
+q2 = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0").requires_grad_()
+k1 = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0").requires_grad_()
+k2 = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0").requires_grad_()
+v = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0").requires_grad_()
+o = piecewise_attn(q1, k1, q2, k2, v, dist_threshold, causal=True)
 print(o)
+
+go = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0")
+gq1, gk1, gq2, gk2, gv = torch.autograd.grad(
+    o, (q1, k1, q2, k2, v), go
+)
+print(gq1)
 ```
 
 #### 性能

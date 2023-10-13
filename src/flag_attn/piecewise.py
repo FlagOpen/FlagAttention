@@ -14,6 +14,7 @@ of (q1, k1) or (q2, k2) depending on whether the distance between q & k exceeds 
 The code is adapted from triton's [tutorial](https://github.com/openai/triton/blob/5162871c6cae01a8508a309cf21a8e6b68a4c091/python/tutorials/06-fused-attention.py).
 """
 
+import math
 import torch
 import triton
 import triton.language as tl
@@ -92,6 +93,8 @@ def standalone_forward(q1, k1, q2, k2, v, w, causal, sm_scale):
         num_warps = 4
 
     B, H, M, D = q1.shape
+    if sm_scale is None:
+        sm_scale = 1. / math.sqrt(D)
     N = k1.shape[2]
 
     grid = (triton.cdiv(M, BLOCK_M), B * H, 1)
@@ -123,6 +126,8 @@ def standalone_backward(q1, k1, q2, k2, v, w, causal, sm_scale, o, L, do):
     torch.cuda.set_device(device_index)
 
     B, H, M, D = q1.shape
+    if sm_scale is None:
+        sm_scale = 1. / math.sqrt(D)
 
     # tune for A100, device_capability(8, 0)
     if torch.cuda.get_device_capability(device_index) == (8, 0): 
@@ -201,7 +206,29 @@ def standalone_backward(q1, k1, q2, k2, v, w, causal, sm_scale, o, L, do):
     return dq1, dk1, dq2, dk2, dv
 
 
-attention = PiecewiseAttention.apply
+def attention(q1, k1, q2, k2, v, dist_threshold, causal=False, sm_scale=None):
+    """
+    PiecewiseAttention
+
+    Piecewise deviates from standard scaled dot product attention in that takes 
+    as inputs two q's and two k's as inputs. The attention score is dot product 
+    of (q1, k1) or (q2, k2) depending on whether the distance between q & k 
+    exceeds a threshold.
+
+    Arguments:
+        q1(torch.Tensor): The first queries. The shape is (batch_size, nheads, seqlen_q, headdim).
+        k1(torch.Tensor): The first keys. The shape is (batch_size, nheads, seqlen_k, headdim).
+        q2(torch.Tensor): The second queries. The shape is (batch_size, nheads, seqlen_q, headdim).
+        k2(torch.Tensor): The second keys. The shape is (batch_size, nheads, seqlen_k, headdim).
+        v(torch.Tensor): The values. The shape is (batch_size, nheads, seqlen_k, headdim).
+        dist_threshold(int): The threshold of distance between q and k. When the distance is not greater than w, the attention score is dot(q1, k1); otherwise dot(q2, k2).
+        causal(bool): Whether causal masking is applied to attention scores before applying softmax.
+        sm_scale(float): The scaling of attention scores before applying softmax.
+
+    Returns:
+        out: (torch.Tensor): The output. The shape is (batch_size, nheads, seqlen_q, headdim).
+    """
+    return PiecewiseAttention.apply(q1, k1, q2, k2, v, dist_threshold, causal, sm_scale)
 
 @triton.jit
 def _fwd_kernel(
