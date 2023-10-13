@@ -4,7 +4,7 @@
 
 FlagAttention 是一个用 Triton 语言实现的内存高效 Attention 算子项目。FlagAttention 受到 [FlashAttention](https://arxiv.org/abs/2205.14135) 和 [FlashAttention v2](https://tridao.me/publications/flash2/flash2.pdf) 的启发，并从大型语言建模研究的具体需求出发扩展它的功能。FlashAttention 和 FlashAttention-2 可以节省内存占用和访存以提高内存效率，但要对它们进行修改，添加更多选项和功能，则需要熟练的 cuda 编程技能。因此，FlagAttention 使用 Triton 来语言实现，它更便于编写自定义 GPU kernel。
 
-FlagAttention 提供的算子具有和 FlashAttention 相似的访存高效、运行速度快的特点，可以支持大语言模型在长文本上的训练和推理。作为开箱即用的高效 Attention 算子库，FlagAttention 寻求高效和泛用性之间的平衡点，对基础功能进行扩展，而不是针对某个特定模型为其定义所有细节。目前其中的 PiecewiseAttention 用于 [Aquila 34B](https://github.com/FlagAI-Open/Aquila2) 模型的推理，但这个算子也可以用于其他模型。
+FlagAttention 提供的算子具有和 FlashAttention 相似的访存高效、运行速度快的特点，可以支持大语言模型在长文本上的训练和推理。作为开箱即用的高效 Attention 算子库，FlagAttention 寻求高效和泛用性之间的平衡点，对基础功能进行扩展，而不是针对某个特定模型为其适配所有细节。目前其中的 PiecewiseAttention 用于 [Aquila 34B](https://github.com/FlagAI-Open/Aquila2) 模型的推理，但这个算子也可以用于其他模型。
 
 如果需要更多的定制和修改，FlagAttention 中的算子实现也可以作为参考或修改的起点。
 
@@ -46,6 +46,8 @@ pip install build
 
 ```sh
 git clone https://github.com/FlagOpen/FlagAttention && cd FlagAttention
+# 以非隔离模式安装需要自行安装依赖
+pip install -U setuptools setuptools-scm
 python -m build --no-isolation
 ```
 
@@ -127,10 +129,10 @@ print(gq1)
 
 下面展示 A100 上使用 causal 模式的 piecewise_attention 的正向和反向算子的性能。测试参数如下：
 
-1. seqlen 为 512, 1k, 2k, 4k, 16k, 32k;
-2. batch size 为 32k / seqlen;
-3. headdim 为 64, 128；
-4. num_heads 为 2048 / headdim.
+1. seqlen 为 `[512, 1k, 2k, 4k, 16k, 32k]`;
+2. batch size 为 `32k / seqlen`;
+3. headdim 为 `[64, 128]`；
+4. num_heads 为 `2048 / headdim`.
 
 Headdim=64
 ![headdim64, A100, causal](./assets/headdim64-causal-A100.png)
@@ -151,7 +153,7 @@ Headdim=128
 
 #### 限制
 
-- headdim 必须为 `[16, 32, 64, 128]` 之一；
+- `headdim` 必须为 `[16, 32, 64, 128]` 之一；
 - 尚未支持对 attention weight 使用 dropout。
 
 ## TODOs
