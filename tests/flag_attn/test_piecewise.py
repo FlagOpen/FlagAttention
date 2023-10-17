@@ -24,7 +24,7 @@ def max_diff(a, b):
     (1, 2, 8192, 32, 0),
 ])
 @pytest.mark.parametrize('causal', [True, False])
-@pytest.mark.parametrize('dtype', [torch.float16])
+@pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
 def test_attention_standalone(B, H, T, D, P_SEQ, causal, dtype, scale, device_id):
     device = f"cuda:{device_id}"
     q1 = torch.empty((B, H, T, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
