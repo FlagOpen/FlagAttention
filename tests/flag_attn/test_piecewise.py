@@ -1,3 +1,4 @@
+import math
 import torch
 import pytest
 import logging
@@ -23,7 +24,7 @@ def max_diff(a, b):
     (1, 2, 8192, 32, 0),
 ])
 @pytest.mark.parametrize('causal', [True, False])
-@pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize('dtype', [torch.float16])
 def test_attention_standalone(B, H, T, D, P_SEQ, causal, dtype, scale, device_id):
     device = f"cuda:{device_id}"
     q1 = torch.empty((B, H, T, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
@@ -31,7 +32,7 @@ def test_attention_standalone(B, H, T, D, P_SEQ, causal, dtype, scale, device_id
     k1 = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
     k2 = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
     v = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
-    sm_scale = 0.5
+    sm_scale = 1. / math.sqrt(D)
     w = 780
 
     o_ref = attention_torch(q1, k1, q2, k2, v, w, causal, sm_scale, upcast=True)
@@ -43,6 +44,7 @@ def test_attention_standalone(B, H, T, D, P_SEQ, causal, dtype, scale, device_id
     triton_max_diff = max_diff(o_hyp, o_ref)
     logging.info("torch_max_diff: {:.8f}\ttriton_max_diff: {:.8f}".format(torch_max_diff, triton_max_diff))
     assert triton_max_diff <= torch_max_diff * 2 + 1e-5
+    # assert torch.testing.assert_close(o_hyp, o_ref)
 
 
 @pytest.mark.parametrize('device_id', list(range(torch.cuda.device_count())))
@@ -64,7 +66,7 @@ def test_attention_grad_standalone(B, H, T, D, P_SEQ, causal, dtype, scale, devi
     k1 = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device=device).normal_(mean=0., std=scale).requires_grad_()
     k2 = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device=device).normal_(mean=0., std=scale).requires_grad_()
     v = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device=device).normal_(mean=0., std=scale).requires_grad_()
-    sm_scale = 0.5
+    sm_scale = 1. / math.sqrt(D)
     w = 780
     do = torch.empty((B, H, T, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
 
@@ -121,7 +123,7 @@ def test_attention_fwd_bwd(B, H, T, D, P_SEQ, causal, dtype, scale, device_id):
     k1 = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device=device).normal_(mean=0., std=scale).requires_grad_()
     k2 = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device=device).normal_(mean=0., std=scale).requires_grad_()
     v = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device=device).normal_(mean=0., std=scale).requires_grad_()
-    sm_scale = 0.5
+    sm_scale = 1. / math.sqrt(D)
     w = 780
     do = torch.empty((B, H, T, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
 

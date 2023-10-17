@@ -304,6 +304,7 @@ def _fwd_kernel(
     for start_n in range(lo, hi, BLOCK_N):
         offs_n = start_n + offs_n_base
         mask_n = offs_n < (N_CTX + P_SEQ)
+        valid_mask = mask_m[:, None] & mask_n
         causal_mask = (P_SEQ + offs_m[:, None]) >= offs_n[None, :]
         piecewise_mask = (P_SEQ + offs_m[:, None]) >= (offs_n[None, :] + w)
         # -- load k, v --
@@ -311,13 +312,15 @@ def _fwd_kernel(
         k2 = tl.load(k2_ptrs, mask=mask_n[:, None])
         v = tl.load(v_ptrs, mask=mask_n[:, None])
         # -- compute qk ---
-        qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=input_dtype)
+        qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         qk += tl.where(piecewise_mask, 
                        tl.dot(q2, tl.trans(k2), out_dtype=tl.float32), 
                        tl.dot(q1, tl.trans(k1), out_dtype=tl.float32))
         qk *= qk_scale
         if IS_CAUSAL:
-            qk = tl.where(causal_mask, qk, float("-inf"))
+            qk = tl.where(causal_mask & valid_mask, qk, float("-inf"))
+        else:
+            qk = tl.where(valid_mask, qk, float("-inf"))
 
         # -- compute scaling constant ---
         m_i_new = tl.maximum(m_i, tl.max(qk, 1))
@@ -454,6 +457,7 @@ def _bwd_kv_kernel(
         q2 = tl.load(q2_ptrs, mask=mask_m[:, None])
 
         # recompute p = softmax(qk, dim=-1).T
+        valid_mask = mask_m[:, None] & mask_n
         causal_mask = (P_SEQ + offs_m[:, None]) >= (offs_n[None, :]) # (BLOCK_M, BLOCK_N)
         piecewise_mask = (P_SEQ + offs_m[:, None]) >= (offs_n[None, :] + w) # (BLOCK_M, BLOCK_N)
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
@@ -462,7 +466,9 @@ def _bwd_kv_kernel(
                        tl.dot(q1, k1, out_dtype=tl.float32))
         qk *= qk_scale
         if CAUSAL:
-            qk = tl.where(causal_mask, qk, float("-inf"))
+            qk = tl.where(causal_mask & valid_mask, qk, float("-inf"))
+        else:
+            qk = tl.where(valid_mask, qk, float("-inf"))
 
         # -- recompute p ---
         l = tl.load(l_ptrs + offs_m, mask=mask_m)
@@ -591,6 +597,7 @@ def _bwd_q_kernel(
         k2 = tl.load(k2_ptrs, mask=mask_n[:, None])
 
         # recompute p = softmax(qk, dim=-1).T
+        valid_mask = mask_m[:, None] & mask_n
         causal_mask = (P_SEQ + offs_m[:, None]) >= (offs_n[None, :]) # (BLOCK_M, BLOCK_N)
         piecewise_mask = (P_SEQ + offs_m[:, None]) >= (offs_n[None, :] + w) # (BLOCK_M, BLOCK_N)
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
@@ -599,7 +606,9 @@ def _bwd_q_kernel(
                        tl.dot(q1, tl.trans(k1), out_dtype=tl.float32))
         qk *= qk_scale
         if CAUSAL:
-            qk = tl.where(causal_mask, qk, float("-inf"))
+            qk = tl.where(causal_mask & valid_mask, qk, float("-inf"))
+        else:
+            qk = tl.where(valid_mask, qk, float("-inf"))
 
         # -- recompute p ---
         p = tl.math.exp2(qk - l[:, None]) # (BLOCK_M, BLOCK_N)

@@ -1,11 +1,15 @@
+import math
 import torch
 import pytest
 
-def attention(q1, k1, q2, k2, v, w, causal, sm_scale, upcast=False):
+def attention(q1, k1, q2, k2, v, w, causal, sm_scale=None, upcast=False):
     input_dtype = q1.dtype
     if upcast:
         q1, k1, q2, k2, v = q1.float(), k1.float(), q2.float(), k2.float(), v.float()
     # (B, H, T, D)
+    D = q1.shape[-1]
+    if sm_scale is None:
+        sm_scale = 1. / math.sqrt(D)
     kv_seq_len = k1.shape[-2]
     q_seq_len = q1.shape[-2]
     p_seq = kv_seq_len - q_seq_len
