@@ -133,7 +133,7 @@ def standalone_backward(q1, k1, q2, k2, v, w, causal, sm_scale, o, L, do):
     if torch.cuda.get_device_capability(device_index) == (8, 0): 
         BLOCK_M = 64 if D<=64 else 128
         BLOCK_N = 64
-        num_stages = 1 if D<=64 else (2 if q1.dtype == torch.bfloat16 and not causal else 1)
+        num_stages = 1 if D<=64 else (2 if not causal else 1)
         num_warps = 4 if D <=64 else 8
     else: # tune for RTX-3090, device_capability(8, 6)
         BLOCK_M = 64
