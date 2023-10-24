@@ -86,10 +86,10 @@ def standalone_forward(q1, k1, q2, k2, v, w, causal, sm_scale):
         num_stages = 3
         num_warps = 4 if Dk1 <=64 else 8
     else: # tune for RTX-3090, device_capability(8, 6)
-        BLOCK_M = 128 if Dk1 <=64 else 64
-        BLOCK_N = 64
+        BLOCK_M = 32 if Dk1 <=64 else 32
+        BLOCK_N = 16
         # piecewise attention use more shm than flash attention
-        num_stages = 2
+        num_stages = 1
         num_warps = 4
 
     B, H, M, D = q1.shape
@@ -257,7 +257,8 @@ def _fwd_kernel(
     # scale sm_scale by log_2(e) and use
     # 2^x instead of exp in the loop because CSE and LICM
     # don't work as expected with `exp` in the loop
-    qk_scale = sm_scale * 1.44269504
+    log2e: tl.constexpr = 1.4426950408889634
+    qk_scale = sm_scale * log2e
 
     # offset pointers for (batch, head)
     Q1 += off_z * stride_q1z + off_h * stride_q1h
@@ -311,21 +312,24 @@ def _fwd_kernel(
         k1 = tl.load(k1_ptrs, mask=mask_n[:, None])
         k2 = tl.load(k2_ptrs, mask=mask_n[:, None])
         v = tl.load(v_ptrs, mask=mask_n[:, None])
-        # -- compute qk ---
-        qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-        qk += tl.where(piecewise_mask, 
+        # -- compute s = qk ---
+        s = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
+        s += tl.where(piecewise_mask, 
                        tl.dot(q2, tl.trans(k2), out_dtype=tl.float32), 
                        tl.dot(q1, tl.trans(k1), out_dtype=tl.float32))
-        qk *= qk_scale
         if IS_CAUSAL:
-            qk = tl.where(causal_mask & valid_mask, qk, float("-inf"))
+            s = tl.where(causal_mask & valid_mask, s, float("-inf"))
         else:
-            qk = tl.where(valid_mask, qk, float("-inf"))
+            s = tl.where(valid_mask, s, float("-inf"))
 
         # -- compute scaling constant ---
-        m_i_new = tl.maximum(m_i, tl.max(qk, 1))
-        alpha = tl.math.exp2(m_i - m_i_new)
-        p = tl.math.exp2(qk - m_i_new[:, None])
+        m_i_local = tl.max(s, 1)
+        m_i_local_is_inf = m_i_local == float("-inf")
+        m_i_new = tl.maximum(m_i, m_i_local)
+        alpha = tl.where(m_i_local_is_inf,
+                         1.0, tl.exp((m_i - m_i_new) * sm_scale))
+        p = tl.where(m_i_local_is_inf[:, None], 
+                     0.0, tl.exp((s - m_i_new[:, None]) * sm_scale))
         # -- scale and update acc --
         # Plus 0 trick
         acc_scale = l_i * 0 + alpha
@@ -343,7 +347,7 @@ def _fwd_kernel(
     # write back l
     acc = acc / l_i[:, None]
     l_ptrs = L + off_hz * N_CTX + offs_m
-    tl.store(l_ptrs, m_i + tl.math.log2(l_i), mask=mask_m)
+    tl.store(l_ptrs, m_i * sm_scale + tl.log(l_i), mask=mask_m)
     tl.store(o_ptrs, acc.to(input_dtype), mask=mask_m[:, None])
 
 
@@ -394,7 +398,9 @@ def _bwd_kv_kernel(
 
     off_z = off_hz // H
     off_h = off_hz % H
-    qk_scale = sm_scale * 1.44269504
+
+    log2e: tl.constexpr = 1.4426950408889634
+    qk_scale = sm_scale * log2e
 
     # offset pointers for (batch, head)
     Q1 += off_z * stride_q1z + off_h * stride_q1h
@@ -460,32 +466,41 @@ def _bwd_kv_kernel(
         valid_mask = mask_m[:, None] & mask_n
         causal_mask = (P_SEQ + offs_m[:, None]) >= (offs_n[None, :]) # (BLOCK_M, BLOCK_N)
         piecewise_mask = (P_SEQ + offs_m[:, None]) >= (offs_n[None, :] + w) # (BLOCK_M, BLOCK_N)
-        qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-        qk += tl.where(piecewise_mask, 
+        s = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
+        s += tl.where(piecewise_mask, 
                        tl.dot(q2, k2, out_dtype=tl.float32), 
                        tl.dot(q1, k1, out_dtype=tl.float32))
-        qk *= qk_scale
         if CAUSAL:
-            qk = tl.where(causal_mask & valid_mask, qk, float("-inf"))
+            s = tl.where(causal_mask & valid_mask, s, float("-inf"))
         else:
-            qk = tl.where(valid_mask, qk, float("-inf"))
+            s = tl.where(valid_mask, s, float("-inf"))
 
         # -- recompute p ---
         l = tl.load(l_ptrs + offs_m, mask=mask_m)
-        p = tl.math.exp2(qk - l[:, None]) # (BLOCK_M, BLOCK_N)
+        p = tl.math.exp(s * sm_scale - l[:, None]) # (BLOCK_M, BLOCK_N)
+
+        if CAUSAL:
+            p = tl.where(causal_mask & valid_mask, p, 0.0)
+        else:
+            p = tl.where(valid_mask, p, 0.0)
 
         do = tl.load(do_ptrs, mask=mask_m[:, None]) # (BLOCK_M, BLOCK_DMODEL)
         dv += tl.dot(tl.trans(p.to(do.dtype)), do, out_dtype=tl.float32) # (BLOCK_N, BLOCK_DMODEL)  # still correct
 
         # compute dp = dot(v, do)
         Di = tl.load(D_ptrs + offs_m, mask=mask_m)
-        dp = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32) - Di[:, None]
+        dp = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         dp += tl.dot(do.to(input_dtype), tl.trans(v), out_dtype=tl.float32)
 
-        # compute ds = p * (dp - delta[:, None])
-        ds = p * dp * sm_scale # (BLOCK_M, BLOCK_N)
+        # compute ds = p * (dp - delta[:, None]) 
+        # move scale out to dk at last
+        ds = p * (dp - Di[:, None]) # (BLOCK_M, BLOCK_N)
+        
+        # To ensure no small values
         if CAUSAL:
-            ds = tl.where(causal_mask, ds, 0.0)
+            ds = tl.where(causal_mask & valid_mask, ds, 0.0)
+        else:
+            ds = tl.where(valid_mask, ds, 0.0)
         ds2 = tl.where(piecewise_mask, ds, 0.0).to(input_dtype)
         ds1 = tl.where(piecewise_mask, 0.0, ds).to(input_dtype)
 
@@ -498,6 +513,8 @@ def _bwd_kv_kernel(
         q2_ptrs += BLOCK_M * stride_q2m
         do_ptrs += BLOCK_M * stride_dom
 
+    dk1 *= sm_scale
+    dk2 *= sm_scale
     tl.store(dk1_ptrs, dk1.to(input_dtype), mask=mask_n[:, None]) # (BLOCK_N, BLOCK_DMODEL)
     tl.store(dk2_ptrs, dk2.to(input_dtype), mask=mask_n[:, None]) # (BLOCK_N, BLOCK_DMODEL)
     tl.store(dv_ptrs, dv.to(input_dtype), mask=mask_n[:, None]) # (BLOCK_N, BLOCK_DMODEL,)
@@ -533,7 +550,8 @@ def _bwd_q_kernel(
     # scale sm_scale by log_2(e) and use
     # 2^x instead of exp in the loop because CSE and LICM
     # don't work as expected with `exp` in the loop
-    qk_scale = sm_scale * 1.44269504
+    log2e: tl.constexpr = 1.4426950408889634
+    qk_scale = sm_scale * log2e
 
     # offset pointers for (batch, head)
     Q1 += off_z * stride_q1z + off_h * stride_q1h
@@ -581,7 +599,6 @@ def _bwd_q_kernel(
     dq1 = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
     dq2 = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
 
-
     # loop over k, v and update accumulator
     lo = 0
     hi = P_SEQ + (start_m + 1) * BLOCK_M if CAUSAL else N_CTX + P_SEQ
@@ -604,23 +621,31 @@ def _bwd_q_kernel(
         qk += tl.where(piecewise_mask, 
                        tl.dot(q2, tl.trans(k2), out_dtype=tl.float32), 
                        tl.dot(q1, tl.trans(k1), out_dtype=tl.float32))
-        qk *= qk_scale
         if CAUSAL:
             qk = tl.where(causal_mask & valid_mask, qk, float("-inf"))
         else:
             qk = tl.where(valid_mask, qk, float("-inf"))
 
         # -- recompute p ---
-        p = tl.math.exp2(qk - l[:, None]) # (BLOCK_M, BLOCK_N)
+        p = tl.math.exp(qk * sm_scale - l[:, None]) # (BLOCK_M, BLOCK_N)
 
         # compute dp = dot(v, do)
-        dp = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32) - D[:, None]
+        dp = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         dp += tl.dot(do.to(input_dtype), tl.trans(v), out_dtype=tl.float32)
+        if CAUSAL:
+            dp = tl.where(causal_mask & valid_mask, dp, 0.0)
+        else:
+            dp = tl.where(valid_mask, dp, 0.0)
 
         # compute ds = p * (dp - delta[:, None])
-        ds = p * dp * sm_scale # (BLOCK_M, BLOCK_N)
+        # move scale out to dq at last
+        ds = p * (dp - D[:, None]) # (BLOCK_M, BLOCK_N)
+
+        # to ensure no small values
         if CAUSAL:
-            ds = tl.where(causal_mask, ds, 0.0)
+            ds = tl.where(causal_mask & valid_mask, ds, 0.0)
+        else:
+            ds = tl.where(valid_mask, ds, 0.0)
         ds2 = tl.where(piecewise_mask, ds, 0.0).to(input_dtype)
         ds1 = tl.where(piecewise_mask, 0.0, ds).to(input_dtype)
 
@@ -631,7 +656,9 @@ def _bwd_q_kernel(
         k1_ptrs += BLOCK_N * stride_k1n
         k2_ptrs += BLOCK_N * stride_k2n
         v_ptrs += BLOCK_N * stride_vn
-
+    
+    dq1 *= sm_scale
+    dq2 *= sm_scale
     tl.store(dq1_ptrs, dq1.to(input_dtype), mask=mask_m[:, None])
     tl.store(dq2_ptrs, dq2.to(input_dtype), mask=mask_m[:, None])
     

@@ -10,6 +10,8 @@ from flag_attn.piecewise import standalone_forward as attention_triton
 from flag_attn.piecewise import standalone_backward as attention_grad_triton
 from flag_attn.piecewise import attention as piecewise_attn
 
+torch.random.manual_seed(10086)
+
 def max_diff(a, b):
     return (a - b).abs().max().item()
 
@@ -43,7 +45,7 @@ def test_attention_standalone(B, H, T, D, P_SEQ, causal, dtype, scale, device_id
     torch_max_diff = max_diff(o_torch, o_ref)
     triton_max_diff = max_diff(o_hyp, o_ref)
     logging.info("torch_max_diff: {:.8f}\ttriton_max_diff: {:.8f}".format(torch_max_diff, triton_max_diff))
-    assert triton_max_diff <= torch_max_diff * 2 + 1e-5
+    assert triton_max_diff <= torch_max_diff
     # assert torch.testing.assert_close(o_hyp, o_ref)
 
 
