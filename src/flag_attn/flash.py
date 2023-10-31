@@ -74,10 +74,11 @@ class FlashAttention(torch.autograd.Function):
         
         do = do.contiguous()
         delta = torch.empty_like(L)
-        grid = (triton.cdiv(M, BLOCK_M) * B * H, 1, 1)
+        grid = (triton.cdiv(M, BLOCK_M), B, H)
         _bwd_preprocess[grid](
             o, do,
             delta,
+            B * H * M,
             BLOCK_M=BLOCK_M, D_HEAD=D,
         )
 
@@ -229,18 +230,20 @@ def _fwd_kernel(
 def _bwd_preprocess(
     Out, DO,
     Delta,
+    M, 
     BLOCK_M: tl.constexpr, D_HEAD: tl.constexpr,
 ):
     # compute (Out * Dout).sum() for vector interpretation
     off_m = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
+    mask_m = off_m < M
     off_n = tl.arange(0, D_HEAD)
     # load
-    o = tl.load(Out + off_m[:, None] * D_HEAD + off_n[None, :]).to(tl.float32)
-    do = tl.load(DO + off_m[:, None] * D_HEAD + off_n[None, :]).to(tl.float32)
+    o = tl.load(Out + off_m[:, None] * D_HEAD + off_n[None, :], mask=mask_m[:, None]).to(tl.float32)
+    do = tl.load(DO + off_m[:, None] * D_HEAD + off_n[None, :], mask=mask_m[:, None]).to(tl.float32)
     # compute
     delta = tl.sum(o * do, axis=1)
     # write-back
-    tl.store(Delta + off_m, delta)
+    tl.store(Delta + off_m, delta, mask=mask_m)
 
 @triton.jit
 def _bwd_kernel(
