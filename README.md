@@ -63,7 +63,7 @@ FlagAttention provides customized attention operators. When an operator is equiv
 
 ## Run the Tests
 
-A recent version of `pytest`(>=7.1.0) is required to run the tests in `tests/`. Operators in `FlagAttention` are tested against a [reference implementation](tests/flag_attn/ref_impl) in pytorch, both forward and backward. For operators with support for inputs of `float16` or `bfloat16`, three different implementations are included for numerical accuracy testing.
+A recent version of `pytest`(>=7.1.0) is required to run the tests in `tests/`. Operators in `FlagAttention` are tested against a [reference implementation](src/flag_attn/testing) in pytorch, both forward and backward. For operators with support for inputs of `float16` or `bfloat16`, three different implementations are included for numerical accuracy testing.
 
 1. The implementation used as reference is an implementation in PyTorch which upcasts the inputs to `float32` and performs the computations in `float32` all the way through before casting the outputs to `float16` or `bfloat16`. 
 2. The implementation in Triton usually uses `float16` or `bfloat16` for mma(matrix multiplication accumulation) inputs, and `float32` for mma outputs and other computations.

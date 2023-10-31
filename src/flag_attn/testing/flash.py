@@ -23,7 +23,7 @@ def attention(q, k, v, causal, sm_scale=None, upcast=False):
     
     S = torch.matmul(q, k.transpose(2, 3)) * sm_scale
     if causal:
-        S = torch.where(ms + p_seq >= ns, S, torch.finfo(S.dtype).min)
+        S = torch.where(ms + p_seq >= ns, S, float("-inf"))
 
     # upcast attention to fp32
     P = torch.softmax(S, dim=-1, dtype=torch.float32)

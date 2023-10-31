@@ -1,18 +1,9 @@
-import math
 import logging
 import pathlib
 import torch
 import triton
 
-from flag_attn import piecewise_attn
-
-import sys
-path_to_test = pathlib.Path(__file__).parent.parent / "tests" / "flag_attn" 
-print(path_to_test.absolute())
-sys.path.append(str(path_to_test.absolute()))
-from ref_impl.piecewise import attention as piecewise_attn_torch
-
-
+import flag_attn
 
 try:
     from flash_attn.flash_attn_interface import \
@@ -57,8 +48,7 @@ def bench_flash_attention(N_CTX, D_HEAD, causal, mode, provider, dtype=torch.flo
         q2 = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
         k2 = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
         v = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
-        sm_scale = 1. / math.sqrt(D_HEAD)
-        fn = lambda: piecewise_attn(q1, k1, q2, k2, v, w, causal, sm_scale)
+        fn = lambda: flag_attn.piecewise_attention(q1, k1, q2, k2, v, w, causal=causal)
         if mode == 'bwd':
             o = fn()
             do = torch.randn_like(o)
@@ -70,10 +60,9 @@ def bench_flash_attention(N_CTX, D_HEAD, causal, mode, provider, dtype=torch.flo
         q2 = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
         k2 = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
         v = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
-        sm_scale = 1. / math.sqrt(D_HEAD)
 
         try:
-            fn = lambda: piecewise_attn_torch(q1, k1, q2, k2, v, w, causal, sm_scale)
+            fn = lambda: flag_attn.testing.piecewise_attention(q1, k1, q2, k2, v, w, causal=causal)
             if mode == 'bwd':
                 o = fn()
                 do = torch.randn_like(o)
