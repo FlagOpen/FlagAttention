@@ -6,5 +6,8 @@ except ImportError:
     version_tuple = (0, 0, 0)
 
 
-from flag_attn.piecewise import attention as piecewise_attn
+from flag_attn.piecewise import attention as piecewise_attention
+from flag_attn.flash import attention as flash_attention
+
+from flag_attn import testing
 

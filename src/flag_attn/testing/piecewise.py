@@ -2,7 +2,7 @@ import math
 import torch
 import pytest
 
-def attention(q1, k1, q2, k2, v, w, causal, sm_scale=None, upcast=False):
+def attention(q1, k1, q2, k2, v, dist_threshold, causal, sm_scale=None, upcast=False):
     input_dtype = q1.dtype
     if upcast:
         q1, k1, q2, k2, v = q1.float(), k1.float(), q2.float(), k2.float(), v.float()
@@ -20,7 +20,7 @@ def attention(q1, k1, q2, k2, v, w, causal, sm_scale=None, upcast=False):
     
     S1 = torch.matmul(q1, k1.transpose(2, 3))
     S2 = torch.matmul(q2, k2.transpose(2, 3))
-    long_distance = ((ms + p_seq - ns) >= w)
+    long_distance = ((ms + p_seq - ns) >= dist_threshold)
     S = torch.where(long_distance, S2, S1) * sm_scale
     
     if causal:
