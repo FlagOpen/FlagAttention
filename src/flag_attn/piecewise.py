@@ -86,10 +86,10 @@ def standalone_forward(q1, k1, q2, k2, v, w, causal, sm_scale):
         num_stages = 3
         num_warps = 4 if Dk1 <=64 else 8
     else: # tune for RTX-3090, device_capability(8, 6)
-        BLOCK_M = 32 if Dk1 <=64 else 32
-        BLOCK_N = 16
+        BLOCK_M = 128 if Dk1 <=64 else 64
+        BLOCK_N = 64
         # piecewise attention use more shm than flash attention
-        num_stages = 1
+        num_stages = 2
         num_warps = 4
 
     B, H, M, D = q1.shape
