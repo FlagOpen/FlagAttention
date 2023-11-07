@@ -31,10 +31,10 @@ configs = [triton.testing.Benchmark(
     ylabel='tflop/s',
     plot_name=f'attention_d-{D_HEAD}_mode-{mode}_causal-{causal}_dtype-{dtype}',
     args={'D_HEAD': D_HEAD, 'dtype': dtype, 'mode': mode, 'causal': causal}
-) for mode in ['fwd', 'bwd'] 
+) for mode in ['fwd'] 
     for causal in [False, True]
     for dtype in [torch.float16, torch.bfloat16] 
-    for D_HEAD in [64, 128]]
+    for D_HEAD in [64]]
 
 @triton.testing.perf_report(configs)
 def bench_flash_attention(N_CTX, D_HEAD, causal, mode, provider, dtype=torch.float16, device="cuda"):
