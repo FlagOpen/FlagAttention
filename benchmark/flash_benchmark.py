@@ -1,9 +1,13 @@
+import math
 import logging
 import pathlib
 import torch
 import triton
+import triton.ops
 
 import flag_attn
+
+from fused_attention import attention as triton_fused_attention
 
 try:
     from flash_attn import flash_attn_func
@@ -21,11 +25,11 @@ configs = [triton.testing.Benchmark(
     x_names=['N_CTX'],
     x_vals=[2**i for i in range(9, 16)],
     line_arg='provider',
-    line_vals=['piecewise', 'torch'] + (['flash'] if HAS_FLASH else []),
-    line_names=['piecewise', 'torch'] + ([f'flash-{FLASH_VER}'] if HAS_FLASH else []),
-    styles=[('red', '-'), ('green', '-'), ('blue', '-')],
+    line_vals=['flag_attn', 'torch', 'triton'] + (['flash'] if HAS_FLASH else []),
+    line_names=['flag_attn', 'torch', 'triton'] + ([f'flash-{FLASH_VER}'] if HAS_FLASH else []),
+    styles=[('red', '-'), ('green', '-'), ('blue', '-'), ('cyan', '-')],
     ylabel='tflop/s',
-    plot_name=f'piecewise_attention_d-{D_HEAD}_mode-{mode}_causal-{causal}_dtype-{dtype}',
+    plot_name=f'attention_d-{D_HEAD}_mode-{mode}_causal-{causal}_dtype-{dtype}',
     args={'D_HEAD': D_HEAD, 'dtype': dtype, 'mode': mode, 'causal': causal}
 ) for mode in ['fwd', 'bwd'] 
     for causal in [False, True]
@@ -41,7 +45,7 @@ def bench_flash_attention(N_CTX, D_HEAD, causal, mode, provider, dtype=torch.flo
 
     BATCH = 32768 // N_CTX
     H = 2048 // D_HEAD
-    if provider == "piecewise":
+    if provider == "flag_attn":
         q = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
         k = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
         v = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
@@ -86,6 +90,20 @@ def bench_flash_attention(N_CTX, D_HEAD, causal, mode, provider, dtype=torch.flo
             do = torch.randn_like(o)
             fn = lambda: o.backward(do, retain_graph=True)
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
+    if provider == "triton":
+        q = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
+        k = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
+        v = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
+        try:
+            fn = lambda: triton_fused_attention(q, k, v, causal, 1. / math.sqrt(D_HEAD))
+            if mode == 'bwd':
+                o = fn()
+                do = torch.randn_like(o)
+                fn = lambda: o.backward(do, retain_graph=True)
+            ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
+        except triton.runtime.autotuner.OutOfResources:
+            logging.info(f"triton Out of shm for batch_size: {BATCH}, num_heads: {H}, seqlen: {N_CTX}, headdim: {D_HEAD}")
+            ms = float("inf")
 
     # total TFLOPS: following Flash Attention v2, only gemms are counted.
     macs = 2. * BATCH * H * N_CTX * N_CTX * D_HEAD # Q@K, P@V

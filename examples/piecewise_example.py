@@ -1,5 +1,5 @@
 import torch
-from flag_attn import piecewise_attn
+from flag_attn import piecewise_attention
 
 B, H, T, D = 2, 16, 8192, 128
 dist_threshold = T // 2
@@ -9,7 +9,7 @@ q2 = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0").requires_gr
 k1 = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0").requires_grad_()
 k2 = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0").requires_grad_()
 v = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0").requires_grad_()
-o = piecewise_attn(q1, k1, q2, k2, v, dist_threshold, causal=True)
+o = piecewise_attention(q1, k1, q2, k2, v, dist_threshold, causal=True)
 print(o)
 
 go = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0")
