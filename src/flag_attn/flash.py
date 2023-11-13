@@ -3,6 +3,7 @@ import torch
 import triton
 import triton.language as tl
 
+
 class FlashAttention(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, causal, sm_scale):
@@ -14,15 +15,38 @@ class FlashAttention(torch.autograd.Function):
         Dq, Dk, Dv = q.shape[-1], k.shape[-1], v.shape[-1]
         assert Dq == Dk == Dv
         assert Dk in {16, 32, 64, 128}
-        
-        BLOCK_M = 128
-        BLOCK_N = 32
-        num_stages = 2
-        num_warps = 4
 
         B, H, M, D = q.shape
         N = k.shape[2]
         P_SEQ = N - M
+        
+        # tune for A100, device_capability(8, 0)
+        if torch.cuda.get_device_capability(device_index) == (8, 0): 
+            BLOCK_M = 128 
+            BLOCK_N = 64
+            num_stages = 3
+            num_warps = 4
+        else: # tune for RTX-3090, device_capability(8, 6)
+            if not causal:
+                if Dk <= 64:
+                    BLOCK_M = 128 
+                    BLOCK_N = 64
+                    num_stages = 3
+                    num_warps = 4
+                else:
+                    BLOCK_M = 64
+                    BLOCK_N = 32
+                    num_stages = 4
+                    num_warps = 4
+            else:
+                BLOCK_M = 64
+                BLOCK_N = 64 if Dk <= 64 else 32
+                num_stages = 3
+                num_warps = 4
+
+
+        divisible_m = M % BLOCK_M == 0
+        divisible_n = N % BLOCK_N == 0
         if sm_scale is None:
             sm_scale = 1. / math.sqrt(D)
 
@@ -39,6 +63,7 @@ class FlashAttention(torch.autograd.Function):
             o.stride(0), o.stride(1), o.stride(2), o.stride(3),
             B, H, M, P_SEQ,
             BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_DMODEL=D, IS_CAUSAL=causal,
+            DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n, 
             num_warps=num_warps, num_stages=num_stages,
         )
 
@@ -131,6 +156,7 @@ def _fwd_kernel(
     Z, H, N_CTX, P_SEQ,
     BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr, 
     IS_CAUSAL: tl.constexpr,
+    DIVISIBLE_M: tl.constexpr, DIVISIBLE_N: tl.constexpr,
 ):
     input_dtype = Q.dtype.element_ty
     # -- grid id --
@@ -154,7 +180,6 @@ def _fwd_kernel(
     offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n_base = tl.arange(0, BLOCK_N)
     offs_k = tl.arange(0, BLOCK_DMODEL)
-    mask_m = offs_m < N_CTX
 
     # initialize pointers to value-like data 
     q_ptrs = Q + (offs_m[:, None] * stride_qm + offs_k[None, :] * stride_qk) # (BLOCK_M, BLOCK_DMODEL)
@@ -167,7 +192,12 @@ def _fwd_kernel(
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
 
     # load q
-    q = tl.load(q_ptrs, mask=mask_m[:, None])
+    if DIVISIBLE_M:
+        q = tl.load(q_ptrs, cache_modifier=".cg")
+    else:
+        mask_m = offs_m < N_CTX
+        q = tl.load(q_ptrs, mask=mask_m[:, None], cache_modifier=".cg")
+    
     # Dot I trick: to place q in registers, it saves shared memory
     I = tl.where(offs_k[:, None] == offs_k,
                  tl.full((BLOCK_DMODEL, BLOCK_DMODEL), 1.0, dtype=input_dtype),
@@ -186,28 +216,33 @@ def _fwd_kernel(
     for start_n in range(0, hi, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         offs_n = start_n + offs_n_base
-        mask_n = offs_n < (N_CTX + P_SEQ)
-        valid_mask = mask_m[:, None] & mask_n
-        causal_mask = (P_SEQ + offs_m[:, None]) >= offs_n[None, :]
+        
         # -- load k, v --
-        k = tl.load(k_ptrs, mask=mask_n[None, :])
-        v = tl.load(v_ptrs, mask=mask_n[:, None])
+        if DIVISIBLE_N:
+            k = tl.load(k_ptrs, cache_modifier=".cg")
+            v = tl.load(v_ptrs, cache_modifier=".cg")
+        else:
+            mask_n = offs_n < (N_CTX + P_SEQ)
+            k = tl.load(k_ptrs, mask=mask_n[None, :], cache_modifier=".cg")
+            v = tl.load(v_ptrs, mask=mask_n[:, None], cache_modifier=".cg")
+
         # -- compute qk ---
         s = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-        s += tl.dot(q, k, out_dtype=tl.float32)
-        s *= sm_scale
-        s = tl.where(valid_mask, s, float("-inf")) # be rigid & always apply mask
+        s += tl.dot(q, k)
+        s *= qk_scale
+        
+        if not DIVISIBLE_N:
+            s = tl.where(mask_n[None, :], s, float("-inf"))
         if IS_CAUSAL:
+            causal_mask = (P_SEQ + offs_m[:, None]) >= offs_n[None, :]
             s = tl.where(causal_mask, s, float("-inf"))
 
         # -- compute scaling constant ---
         m_i_new = tl.maximum(m_i, tl.max(s, 1))
-        alpha = tl.math.exp(m_i - m_i_new )
-        p = tl.math.exp(s - m_i_new[:, None])
+        alpha = tl.math.exp2(m_i - m_i_new)
+        p = tl.math.exp2(s - m_i_new[:, None])
 
         # -- scale and update acc: acc *= alpha[:, None]--
-        # acc_scale = l_i * 0 + alpha
-        # acc *= acc_scale[:, None]
         acc *= alpha[:, None]
         acc += tl.dot(p.to(input_dtype), v)
 
@@ -219,10 +254,15 @@ def _fwd_kernel(
         v_ptrs += BLOCK_N * stride_vn
 
     # write back l & o
-    acc = acc / l_i[:, None]
-    l = m_i + tl.math.log(l_i) # log(normalizer)
-    tl.store(l_ptrs, l, mask=mask_m)
-    tl.store(o_ptrs, acc.to(input_dtype), mask=mask_m[:, None])
+    acc =  acc * (1.0 / l_i[:, None])
+    l = m_i + tl.math.log2(l_i) # log2(normalizer)
+    if DIVISIBLE_M:
+        tl.store(l_ptrs, l, cache_modifier=".cg")
+        tl.store(o_ptrs, acc.to(input_dtype), cache_modifier=".cg")
+    else:
+        tl.store(l_ptrs, l, mask=mask_m, cache_modifier=".cg")
+        tl.store(o_ptrs, acc.to(input_dtype), mask=mask_m[:, None], cache_modifier=".cg")
+
 
 
 @triton.jit
