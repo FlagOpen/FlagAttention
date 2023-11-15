@@ -22,10 +22,22 @@ class FlashAttention(torch.autograd.Function):
         
         # tune for A100, device_capability(8, 0)
         if torch.cuda.get_device_capability(device_index) == (8, 0): 
-            BLOCK_M = 128 
-            BLOCK_N = 64
-            num_stages = 3
-            num_warps = 4
+            if not causal:
+                if Dk <= 64:
+                    BLOCK_M = 128 
+                    BLOCK_N = 64
+                    num_stages = 3
+                    num_warps = 4
+                else:
+                    BLOCK_M = 128 
+                    BLOCK_N = 128
+                    num_stages = 3
+                    num_warps = 8
+            else:
+                BLOCK_M = 128 if Dk <= 64 else 64
+                BLOCK_N = 64
+                num_stages = 3
+                num_warps = 4
         else: # tune for RTX-3090, device_capability(8, 6)
             if not causal:
                 if Dk <= 64:
