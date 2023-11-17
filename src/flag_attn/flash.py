@@ -43,6 +43,17 @@ class FlashAttention(torch.autograd.Function):
                 if Dk <= 64:
                     BLOCK_M = 128 
                     BLOCK_N = 64
+                    num_stages = 4
+                    num_warps = 4
+                else:
+                    BLOCK_M = 64
+                    BLOCK_N = 32
+                    num_stages = 3
+                    num_warps = 4
+            else: # causal
+                if Dk <= 64:
+                    BLOCK_M = 64 
+                    BLOCK_N = 64
                     num_stages = 3
                     num_warps = 4
                 else:
@@ -50,11 +61,6 @@ class FlashAttention(torch.autograd.Function):
                     BLOCK_N = 32
                     num_stages = 4
                     num_warps = 4
-            else:
-                BLOCK_M = 64
-                BLOCK_N = 64 if Dk <= 64 else 32
-                num_stages = 3
-                num_warps = 4
 
 
         divisible_m = M % BLOCK_M == 0

@@ -34,7 +34,7 @@ configs = [triton.testing.Benchmark(
 ) for mode in ['fwd'] 
     for causal in [False, True]
     for dtype in [torch.float16, torch.bfloat16] 
-    for D_HEAD in [64]]
+    for D_HEAD in [64, 128]]
 
 @triton.testing.perf_report(configs)
 def bench_flash_attention(N_CTX, D_HEAD, causal, mode, provider, dtype=torch.float16, device="cuda"):
