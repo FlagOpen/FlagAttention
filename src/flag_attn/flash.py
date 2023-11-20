@@ -46,20 +46,20 @@ class FlashAttention(torch.autograd.Function):
                     num_stages = 4
                     num_warps = 4
                 else:
-                    BLOCK_M = 64
+                    BLOCK_M = 128
                     BLOCK_N = 32
-                    num_stages = 3
+                    num_stages = 2
                     num_warps = 4
             else: # causal
                 if Dk <= 64:
-                    BLOCK_M = 64 
+                    BLOCK_M = 64
                     BLOCK_N = 64
                     num_stages = 3
                     num_warps = 4
                 else:
                     BLOCK_M = 64
                     BLOCK_N = 32
-                    num_stages = 4
+                    num_stages = 3
                     num_warps = 4
 
 
@@ -195,7 +195,8 @@ def _fwd_kernel(
     O += off_z * stride_oz + off_h * stride_oh
     L += (off_z * H + off_h) * N_CTX # l's shape is (B, H, N_CTX)
 
-    offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_m_base = tl.arange(0, BLOCK_M)
+    offs_m = start_m * BLOCK_M + offs_m_base
     offs_n_base = tl.arange(0, BLOCK_N)
     offs_k = tl.arange(0, BLOCK_DMODEL)
 
@@ -216,11 +217,17 @@ def _fwd_kernel(
         mask_m = offs_m < N_CTX
         q = tl.load(q_ptrs, mask=mask_m[:, None], cache_modifier=".cg")
     
-    # Dot I trick: to place q in registers, it saves shared memory
-    I = tl.where(offs_k[:, None] == offs_k,
-                 tl.full((BLOCK_DMODEL, BLOCK_DMODEL), 1.0, dtype=input_dtype),
-                 tl.full((BLOCK_DMODEL, BLOCK_DMODEL), 0.0, dtype=input_dtype))
-    q = tl.dot(q, I).to(input_dtype)
+    #Dot I trick: to place q in registers, it saves shared memory
+    if BLOCK_DMODEL < 128:
+        I = tl.where(offs_k[:, None] == offs_k,
+                     tl.full((BLOCK_DMODEL, BLOCK_DMODEL), 1.0, dtype=input_dtype),
+                     tl.full((BLOCK_DMODEL, BLOCK_DMODEL), 0.0, dtype=input_dtype))
+        q = tl.dot(q, I).to(input_dtype)
+    # else:
+    #     I = tl.where(offs_m_base[:, None] == offs_m_base,
+    #                  tl.full((BLOCK_M, BLOCK_M), 1.0, dtype=input_dtype),
+    #                  tl.full((BLOCK_M, BLOCK_M), 0.0, dtype=input_dtype))
+    #     q = tl.dot(I, q).to(input_dtype)
 
     if IS_CAUSAL:
         hi = P_SEQ + (start_m + 1) * BLOCK_M
