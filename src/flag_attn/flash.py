@@ -61,7 +61,7 @@ class FlashAttention(torch.autograd.Function):
                 if Dk <= 64:
                     BLOCK_M = 128 
                     BLOCK_N = 64
-                    num_stages = 4
+                    num_stages = 3
                     num_warps = 4
                 else:
                     BLOCK_M = 128
@@ -75,11 +75,10 @@ class FlashAttention(torch.autograd.Function):
                     num_stages = 3
                     num_warps = 4
                 else:
-                    BLOCK_M = 64
+                    BLOCK_M = 128
                     BLOCK_N = 32
-                    num_stages = 3
+                    num_stages = 2
                     num_warps = 4
-
 
         divisible_m = M % BLOCK_M == 0
         divisible_n = N % BLOCK_N == 0
@@ -129,6 +128,7 @@ class FlashAttention(torch.autograd.Function):
         sm_scale = ctx.sm_scale
         causal = ctx.causal
 
+        # tune for A100, device_capability(8, 0)
         if torch.cuda.get_device_capability(device_index) == (8, 0):
             if not causal:
                 BLOCK_M = 128 if D <= 64 else 64
@@ -140,14 +140,29 @@ class FlashAttention(torch.autograd.Function):
                 BLOCK_N = 64
                 num_stages = 3 if D <= 64 else 2
                 num_warps = 4
-        else:
-            BLOCK_M = 64
-            BLOCK_N = 64
+        else: # tune for RTX-3090, device_capability(8, 6)
             if not causal:
-                num_stages = 1 if D <= 64 else 3 # for headdim 128
+                if D <= 64:
+                    BLOCK_M = 64
+                    BLOCK_N = 64
+                    num_stages = 2
+                    num_warps = 4
+                else:
+                    BLOCK_M = 64
+                    BLOCK_N = 64
+                    num_stages = 2
+                    num_warps = 8
             else:
-                num_stages = 4
-            num_warps = 4
+                if D <= 64:
+                    BLOCK_M = 64
+                    BLOCK_N = 64
+                    num_stages = 2
+                    num_warps = 4
+                else:
+                    BLOCK_M = 32
+                    BLOCK_N = 32
+                    num_stages = 2
+                    num_warps = 4
         
         delta = torch.empty_like(L)
         grid = (triton.cdiv(M, BLOCK_M), H, B)
@@ -205,15 +220,6 @@ class FlashAttention(torch.autograd.Function):
 def attention(q, k, v, causal=False, sm_scale=None):
     return FlashAttention.apply(q, k, v, causal, sm_scale)
 
-
-@triton.jit
-def inclusive_multiple_of(m, n):
-    return m // n * n
-
-
-@triton.jit
-def next_multiple_of(m, n):
-    return tl.cdiv(m + 1, n) * n
 
 @triton.jit
 def _fwd_kernel(
