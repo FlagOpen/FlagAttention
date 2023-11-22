@@ -31,7 +31,7 @@ configs = [triton.testing.Benchmark(
     ylabel='tflop/s',
     plot_name=f'attention_d-{D_HEAD}_mode-{mode}_causal-{causal}_dtype-{dtype}',
     args={'D_HEAD': D_HEAD, 'dtype': dtype, 'mode': mode, 'causal': causal}
-) for mode in ['fwd'] 
+) for mode in ['fwd', 'bwd'] 
     for causal in [False, True]
     for dtype in [torch.float16, torch.bfloat16] 
     for D_HEAD in [64, 128]]
