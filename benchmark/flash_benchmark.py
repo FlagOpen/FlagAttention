@@ -41,12 +41,14 @@ def bench_flash_attention(N_CTX, D_HEAD, causal, mode, provider, dtype=torch.flo
     warmup = 25
     rep = 100
 
+    is_bwd = mode == "bwd"
+
     BATCH = 32768 // N_CTX
     H = 2048 // D_HEAD
     if provider == "flag_attn":
-        q = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
-        k = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
-        v = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
+        q = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=is_bwd)
+        k = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=is_bwd)
+        v = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=is_bwd)
         fn = lambda: flag_attn.flash_attention(q, k, v, causal=causal)
         if mode == 'bwd':
             o = fn()
@@ -54,9 +56,9 @@ def bench_flash_attention(N_CTX, D_HEAD, causal, mode, provider, dtype=torch.flo
             fn = lambda: o.backward(do, retain_graph=True)
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
     if provider == "torch":
-        q = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
-        k = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
-        v = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
+        q = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=is_bwd)
+        k = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=is_bwd)
+        v = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=is_bwd)
 
         try:
             fn = lambda: flag_attn.testing.flash_attention(q, k, v, causal=causal, upcast=False)
@@ -70,16 +72,16 @@ def bench_flash_attention(N_CTX, D_HEAD, causal, mode, provider, dtype=torch.flo
             ms = float("inf")
     if provider == "flash":
         if FLASH_VER == 1:
-            qkv = torch.randn((BATCH, N_CTX, 3, H, D_HEAD), dtype=dtype, device=device, requires_grad=True)
+            qkv = torch.randn((BATCH, N_CTX, 3, H, D_HEAD), dtype=dtype, device=device, requires_grad=is_bwd)
             lengths = torch.full((BATCH,), fill_value=N_CTX, device=device)
             cu_seqlens = torch.zeros((BATCH + 1,), device=device, dtype=torch.int32)
             cu_seqlens[1:] = lengths.cumsum(0)
             qkv = qkv.reshape(BATCH * N_CTX, 3, H, D_HEAD)
             fn = lambda: flash_attn_func(qkv, cu_seqlens, 0., N_CTX, causal=causal)
         elif FLASH_VER == 2:
-            q = torch.randn((BATCH, N_CTX, H, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
-            k = torch.randn((BATCH, N_CTX, H, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
-            v = torch.randn((BATCH, N_CTX, H, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
+            q = torch.randn((BATCH, N_CTX, H, D_HEAD), dtype=dtype, device="cuda", requires_grad=is_bwd)
+            k = torch.randn((BATCH, N_CTX, H, D_HEAD), dtype=dtype, device="cuda", requires_grad=is_bwd)
+            v = torch.randn((BATCH, N_CTX, H, D_HEAD), dtype=dtype, device="cuda", requires_grad=is_bwd)
             fn = lambda: flash_attn_func(q, k, v, causal=causal)
         else:
             raise ValueError(f'unknown {FLASH_VER = }')
