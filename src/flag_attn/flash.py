@@ -29,15 +29,33 @@ class FlashAttention(torch.autograd.Function):
                     num_stages = 3
                     num_warps = 4
                 else:
-                    BLOCK_M = 128 
-                    BLOCK_N = 128
-                    num_stages = 3
-                    num_warps = 8
+                    if M <= 1024:
+                        BLOCK_M = 128
+                        BLOCK_N = 32
+                        num_stages = 3
+                        num_warps = 4
+                    else:
+                        BLOCK_M = 128 
+                        BLOCK_N = 128
+                        num_stages = 3
+                        num_warps = 8
             else:
-                BLOCK_M = 128 if Dk <= 64 else 64
-                BLOCK_N = 64
-                num_stages = 3
-                num_warps = 4
+                if Dk <= 64:
+                    BLOCK_M = 128 
+                    BLOCK_N = 64
+                    num_stages = 3 if M <= 2048 else 4
+                    num_warps = 4
+                else:
+                    if M <= 1024:
+                        BLOCK_M = 128
+                        BLOCK_N = 32
+                        num_stages = 2
+                        num_warps = 4
+                    else:
+                        BLOCK_M = 128 
+                        BLOCK_N = 128
+                        num_stages = 3
+                        num_warps = 8
         else: # tune for RTX-3090, device_capability(8, 6)
             if not causal:
                 if Dk <= 64:
@@ -111,13 +129,25 @@ class FlashAttention(torch.autograd.Function):
         sm_scale = ctx.sm_scale
         causal = ctx.causal
 
-        BLOCK_M = 64
-        BLOCK_N = 64
-        if not causal:
-            num_stages = 1 if D <= 64 else 3 # for headdim 128
+        if torch.cuda.get_device_capability(device_index) == (8, 0):
+            if not causal:
+                BLOCK_M = 128 if D <= 64 else 64
+                BLOCK_N = 64
+                num_stages = 2
+                num_warps = 4
+            else:
+                BLOCK_M = 64
+                BLOCK_N = 64
+                num_stages = 3 if D <= 64 else 2
+                num_warps = 4
         else:
-            num_stages = 4
-        num_warps = 4
+            BLOCK_M = 64
+            BLOCK_N = 64
+            if not causal:
+                num_stages = 1 if D <= 64 else 3 # for headdim 128
+            else:
+                num_stages = 4
+            num_warps = 4
         
         delta = torch.empty_like(L)
         grid = (triton.cdiv(M, BLOCK_M), H, B)
