@@ -43,7 +43,7 @@ class FlashAttention(torch.autograd.Function):
                 if Dk <= 64:
                     BLOCK_M = 128 
                     BLOCK_N = 64
-                    num_stages = 3 if M <= 2048 else 4
+                    num_stages = 4
                     num_warps = 4
                 else:
                     if M <= 1024:

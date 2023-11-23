@@ -1,5 +1,6 @@
 import logging
 import pathlib
+import datetime
 import torch
 import triton
 
@@ -109,6 +110,7 @@ def bench_flash_attention(N_CTX, D_HEAD, causal, mode, provider, dtype=torch.flo
     return total_flops / ms * 1e-9
 
 # only works on post-Ampere GPUs right now
-output_dir = pathlib.Path("results_piecewise_attention")
+today = datetime.date.today().strftime(format("%Y%m%d"))
+output_dir = pathlib.Path(f"results_piecewise_attention_{today}")
 output_dir.mkdir(exist_ok=True)
 bench_flash_attention.run(save_path=output_dir, print_data=True)

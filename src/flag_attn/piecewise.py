@@ -84,11 +84,16 @@ def standalone_forward(q1, k1, q2, k2, v, w, causal, sm_scale):
 
     # tune for A100, device_capability(8, 0)
     if torch.cuda.get_device_capability(device_index) == (8, 0): 
-        BLOCK_M = 128
-        BLOCK_N = 32 if Dk1 <=64 else 64
-        # piecewise attention use more shm than flash attention
-        num_stages = 3
-        num_warps = 4 if Dk1 <=64 else 8
+        if not causal:
+            if D <= 64:
+                BLOCK_M, BLOCK_N, num_stages, num_warps = 128, 32, 3, 4
+            else:
+                BLOCK_M, BLOCK_N, num_stages, num_warps = 128, 64, 3, 8
+        else:
+            if D <= 64:
+                BLOCK_M, BLOCK_N, num_stages, num_warps = 128, 32, 3, 4
+            else:
+                BLOCK_M, BLOCK_N, num_stages, num_warps = 128, 64, 4, 8
     else: # tune for RTX-3090, device_capability(8, 6)
         if not causal:
             if D <= 64:
@@ -139,6 +144,17 @@ def standalone_backward(q1, k1, q2, k2, v, w, causal, sm_scale, o, L, do):
 
     # tune for A100, device_capability(8, 0)
     if torch.cuda.get_device_capability(device_index) == (8, 0): 
+        if not causal:
+            if D <= 64:
+                BLOCK_M, BLOCK_N, num_stages, num_warps = 64, 64, 2, 4
+            else:
+                BLOCK_M, BLOCK_N, num_stages, num_warps = 128, 64, 2, 8
+        else:
+            if D <= 64:
+                BLOCK_M, BLOCK_N, num_stages, num_warps = 64, 64, 3, 4
+            else:
+                BLOCK_M, BLOCK_N, num_stages, num_warps = 32, 64, 2, 4
+        
         BLOCK_M = 64 if D<=64 else 128
         BLOCK_N = 64
         num_stages = 1 if D<=64 else (2 if not causal else 1)
@@ -313,7 +329,7 @@ def _fwd_kernel(
     if DIVISIBLE_M:
         q1 = tl.load(q1_ptrs)
         q2 = tl.load(q2_ptrs)
-    if not DIVISIBLE_M:
+    else:
         mask_m = offs_m < N_CTX
         q1 = tl.load(q1_ptrs, mask=mask_m[:, None])
         q2 = tl.load(q2_ptrs, mask=mask_m[:, None])
