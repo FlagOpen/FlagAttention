@@ -164,6 +164,9 @@ class FlashAttention(torch.autograd.Function):
                     num_stages = 2
                     num_warps = 4
         
+        divisible_m = M % BLOCK_M == 0
+        divisible_n = N % BLOCK_N == 0
+
         delta = torch.empty_like(L)
         grid = (triton.cdiv(M, BLOCK_M), H, B)
         _bwd_preprocess[grid](
@@ -174,13 +177,12 @@ class FlashAttention(torch.autograd.Function):
             delta.stride(0), delta.stride(1), delta.stride(2),
             M,
             BLOCK_M=BLOCK_M, D_HEAD=D,
+            DIVISIBLE_M=divisible_m,
         )
 
         dk = torch.empty_like(k)
         dv = torch.empty_like(v)
         grid = (triton.cdiv(N, BLOCK_N), H, B)
-        divisible_m = M % BLOCK_M == 0
-        divisible_n = N % BLOCK_N == 0
         _bwd_kv_kernel[grid](
             q, k, v, sm_scale, do, 
             dk, dv,
@@ -356,6 +358,7 @@ def _bwd_preprocess(
     stride_dz, stride_dh, stride_dm,
     M,
     BLOCK_M: tl.constexpr, D_HEAD: tl.constexpr,
+    DIVISIBLE_M: tl.constexpr,
 ):
     off_h = tl.program_id(1)
     off_z = tl.program_id(2)
@@ -364,19 +367,29 @@ def _bwd_preprocess(
     Delta += off_z * stride_dz + off_h * stride_dh
 
     # compute (Out * Dout).sum() for vector interpretation
-    off_m = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
-    mask_m = off_m < M
+    off_m = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)        
     off_n = tl.arange(0, D_HEAD)
+
     # load
     o_ptrs = Out + off_m[:, None] * stride_om + off_n[None, :] * stride_ok
-    o = tl.load(o_ptrs, mask=mask_m[:, None]).to(tl.float32)
     do_ptrs = DO + off_m[:, None] * stride_dom + off_n[None, :] * stride_dok
-    do = tl.load(do_ptrs, mask=mask_m[:, None]).to(tl.float32)
+
+    if DIVISIBLE_M:
+        o = tl.load(o_ptrs).to(tl.float32)
+        do = tl.load(do_ptrs).to(tl.float32)
+    if not DIVISIBLE_M:
+        mask_m = off_m < M
+        o = tl.load(o_ptrs, mask=mask_m[:, None]).to(tl.float32)
+        do = tl.load(do_ptrs, mask=mask_m[:, None]).to(tl.float32)
+    
     # compute
     delta = tl.sum(o * do, axis=1)
     # write-back
     d_ptrs = Delta + off_m * stride_dm
-    tl.store(d_ptrs, delta, mask=mask_m)
+    if DIVISIBLE_M:
+        tl.store(d_ptrs, delta)
+    else:
+        tl.store(d_ptrs, delta, mask=mask_m)
 
 
 @triton.jit
