@@ -2,19 +2,28 @@
 
 [中文版](./README_cn.md)
 
-FlagAttention is a project for memory-efficient attention operators implemented in the Triton language. It is inspired by [FlashAttention](https://arxiv.org/abs/2205.14135) and [FlashAttention v2](https://tridao.me/publications/flash2/flash2.pdf) and extends them to satisfy the needs for research on large language modeling. FlashAttention and FlashAttention-2 save memory footprint and traffic to improve memory efficiency, but to modify them and add more options and functionalities requires proficiency in cuda programming. Thus, Flag Attention is implemented in the Triton language, which is easier to use to write custom GPU kernels.
+FlagAttention is a project for memory-efficient attention operators implemented in the [Triton language](https://github.com/openai/triton). Motivated by the need of non-standard attention operators in language modeling, it starts as an extension to multi-head attention.
 
-The operators provided by FlagAttention are memory-efficient and run fast, like FlashAttention, which scales large language models to longer sequences. As an out-of-the-box collection of efficient  attention operators, FlagAttention balances efficiency and generality. FlagAttention makes extensions to the basic functionalities instead of tailor-made operators for every detail of a specific model. PiecewiseAttention is currently used for inference in the [Aquila 34B](https://github.com/FlagAI-Open/Aquila2) model, but it can also be used by other models.
+It is memory-efficient like [FlashAttention](https://arxiv.org/abs/2205.14135) and [FlashAttention v2](https://tridao.me/publications/flash2/flash2.pdf) in that it save memory footprint and traffic. Implemented in the Triton language, it is easier to understand and modify. The original implementation of FlashAttention in CUDA([flash-attention](https://github.com/Dao-AILab/flash-attention)) provides a good example on how to design an algorithm that takes different levels of memory into account. By tiling and re-computation, FlashAttention avoids materializing the attention scores, whose capacity is proportional to the square of the sequence length. However, custom transformation to the attention scores is not possible when using FlashAttention, unless it is supported by FlashAttention out-of-the-box.
+While extending FlashAttention requires proficiency in CUDA programming, FlagAttention implemented in the Triton language is easier to modify.
 
-When further customization is needed, FlagAttention can also be a reference or starting point.
+FlagAttention provides two operators now.
+
+1. flash_attention. The implementation of FlashAttention in the Triton language.
+2. piecewise_attention. It is currently used to implement NLPE(non linear position embddding), which is used in the training and inference in the [Aquila-2-34B](https://github.com/FlagAI-Open/Aquila2) model.
+
+When further customization is needed, FlagAttention servers as an example.
 
 ## Requirements
 
-FlagAttention requires Pytorch and Triton. To use the new features of Triton, Triton nightly is recommended.
+FlagAttention requires Pytorch and Triton. To use the new features of Triton, a nightly release is recommended.
 
-Instructions to install Pytorch nightly can be found at https://pytorch.org/get-started/locally/ . Triton is now a dependency of torch nightly, so it can be installed automatically.
 
-FlagAttention requires Ampere Nvidia GPUs(e.g. A100, RTX-3090, ...) and CUDA Toolkit 11.6 and above. Other GPUs may work but have not been tested yet.
+```sh
+pip install -U --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/Triton-Nightly/pypi/simple/ triton-nightly
+```
+
+FlagAttention requires Ampere Nvidia GPUs(e.g. A100, RTX-3090, ...) and CUDA Toolkit 11.6 or above. Other GPUs may work but have not been tested yet.
 
 ## Installation
 
@@ -63,7 +72,7 @@ FlagAttention provides customized attention operators. When an operator is equiv
 
 ## Run the Tests
 
-A recent version of `pytest`(>=7.1.0) is required to run the tests in `tests/`. Operators in `FlagAttention` are tested against a [reference implementation](src/flag_attn/testing) in pytorch, both forward and backward. For operators with support for inputs of `float16` or `bfloat16`, three different implementations are included for numerical accuracy testing.
+A recent version of `pytest`(>=7.1.0) is required to run the tests in `tests/`. Operators in `FlagAttention` are tested against [reference implementations](src/flag_attn/testing) in Pytorch provided by `flag_attn.testing`, both for the forward and the backward operators. For operators with support for inputs of `float16` or `bfloat16`, three different implementations are included for numerical accuracy testing.
 
 1. The implementation used as reference is an implementation in PyTorch which upcasts the inputs to `float32` and performs the computations in `float32` all the way through before casting the outputs to `float16` or `bfloat16`. 
 2. The implementation in Triton usually uses `float16` or `bfloat16` for mma(matrix multiplication accumulation) inputs, and `float32` for mma outputs and other computations.
@@ -77,35 +86,48 @@ pytest .
 
 ## Run the Benchmark
 
-Benchmarks are provided to measure the TFLOPs/s achieved. FLOPs/s is used as a metric for speed of the operator. To calculate the FLOPs of an operator, only matmul is counted. The FLOPs is divided by the median runtime to get the achieved FLOPs/s.
+Benchmarks are provided to measure the achieved TFLOPs/s. FLOPs/s is used as a metric for speed of the operator. To calculate the FLOPs of an operator, only matmul is counted. The FLOPs is divided by the median runtime to get the achieved FLOPs/s.
 
 We benchmark operators in Triton implementation against a reference implementation in Pytorch. When the input size is large, the reference implementation in Pytorch runs out of memory. In such cases, the FLOP/s is treated as zero.
 
-The speed of `Flash Attention v2` (https://github.com/Dao-AILab/flash-attention, v2.2.3) with the same size of inputs is also provided as a reference. But since operators in `FlagAttention` deviates from Flash Attention, the total amount of computation is different even when batch size, sequence length, number of heads, head dimension, and other configurations are the same. 
+```sh
+cd benchmarks/
+python flash_benchmark.py
+python piecewise_benchmark.py
+```
 
 ## Operators
 
-### Piecewise Attention
+### flash_attention
 
-The first extension of Flash Attention is [piecewise attention](src/flag_attn/piecewise.py).
+The implementation of FlashAttention in the Triton language. The interface is.
+
+```python
+flash_attention(q, k, v, causal=False, sm_scale=None)
+```
+
+### piecewise_attention
+
+The first extension to FlashAttention is [piecewise_attention](src/flag_attn/piecewise.py).
 
 The interface is shown below.
 
 ```python
-piecewise_attention(q1, k1, q2, k2, v, dist_threshold, softmax_scale=None, causal=False)
+piecewise_attention(q1, k1, q2, k2, v, dist_threshold, causal=False, sm_scale=None)
 ```
 
-It is named `piecewise_attention` in that it takes two `q`'s and two `k`'s to compute attention scores (S) before applying softmax to get the attention weights (P). The design originates from the fact that a transformer with rotary position embedding is not good at predicting sequences longer than the longest sequence that it is trained on. Pairs of (q, k) get unexpectedly high attention scores when the distance is greater than the maximum sequence length in the training set. A proposal to solve the problem is to compute the attention score in different ways, depending on whether the distance between `q` and `k` is greater than a threshold.
+It is named `piecewise_attention` in that it takes two `q`'s and two `k`'s to compute attention scores(S) before applying softmax to get the attention weights(P). The design originates from the fact that a transformer with rotary position embedding is not good at predicting sequences longer than the longest sequence that it is trained on. Pairs of (q, k) get unexpectedly high attention scores when the distance is greater than the maximum sequence length in the training set. A proposal to solve the problem is to compute the attention score in different ways, depending on whether the distance between `q` and `k` is greater than a threshold.
 
-In practice, `q` and `k` can be preprocessed in two different ways to get `q1, q2` and `k1, k2`. Then the attention score is computed as the dot product of `q1, k1` or `q2, k2` depending on the distance between `q` and `k`.
+NLPE(non linear position embedding) proposed by BAAI applies two different position embeddings to `q` and `k` get `q1, q2` and `k1, k2`. Then the attention score is computed as the dot product of `q1, k1` or `q2, k2` depending on the distance between `q` and `k`.
 
 ![piecewise attention](assets/piecewise_attention.png)
 
 #### Usage
 
 ```python
+# piecewise_attention
 import torch
-from flag_attn import piecewise_attn
+from flag_attn import piecewise_attention
 
 B, H, T, D = 2, 16, 8192, 128
 dist_threshold = T // 2
@@ -115,7 +137,7 @@ q2 = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0").requires_gr
 k1 = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0").requires_grad_()
 k2 = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0").requires_grad_()
 v = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0").requires_grad_()
-o = piecewise_attn(q1, k1, q2, k2, v, dist_threshold, causal=True)
+o = piecewise_attention(q1, k1, q2, k2, v, dist_threshold, causal=True)
 print(o)
 
 go = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0")
@@ -125,29 +147,59 @@ gq1, gk1, gq2, gk2, gv = torch.autograd.grad(
 print(gq1)
 ```
 
+```python
+# flash_attention
+import torch
+from flag_attn import flash_attention
+
+B, H, T, D = 2, 16, 8192, 128
+
+q = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0").requires_grad_()
+k = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0").requires_grad_()
+v = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0").requires_grad_()
+o = flash_attention(q, k, v, causal=True)
+print(o)
+
+go = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0")
+gq, gk, gv = torch.autograd.grad(
+    o, (q, k, v), go
+)
+print(gq)
+```
+
 #### Performance
 
-Performance for piecewise_attention with causal masking on A100 is shown below. Testing parameters are
+Benchmark is performed under such conditions.
 
 1. seqlen in `[512, 1k, 2k, 4k, 16k, 32k]`;
 2. batch size: `32k / seqlen`;
 3. headdim in`[64, 128]`；
 4. num_heads: `2048 / headdim`.
 
-Headdim=64
-![headdim64, A100, causal](./assets/headdim64-causal-A100.png)
+##### flash_attention
 
----
+The performance of flash_attention with causal masking is shown below.
 
-Headdim=128
-![headdim128, A100, causal](./assets/headdim128-causal-A100.png)
+![headdim64](./assets/v0.2/flash_attention_d64.png)
+
+![headdim128](./assets/v0.2/flash_attention.png)
+
+The forward operator runs as fast as, and in some cases, faster than FlashAttention(CUDA). However, the backward operator is generally slower than FlashAttention. We at first following the paper and update the gradient of Q with atomic addition, which runs extremely slow. Then we split the backward into two kernels, one to compute the gradient of k and v, the other to compute the gradient of q. It avoids atomic addition, but adds more re-computation. This bring a 4x to 5x speedup in the backward operator, thought still slower than FlashAttention(CUDA).
+
+We apply the same split kernel trick to piecewise_attention, too.
+
+##### piecewise_attention
+
+The performance of piecewise_attention has improved compared to that in v0.1. In the case where the head dim is 128 and causal masking is applied, the forward and backward operator is faster than that in v0.1 by 36% and 9%, respectively.
+
+![piecewise_attention](./assets/v0.2/piecewise_attention.png)
 
 #### Features
 
 - support for [Nvidia](https://www.nvidia.com/) Ampere GPU(Tested on RTX-3090 and A100)；
 - support for [Iluvatar CoreX](https://www.iluvatar.com/) GPU(Tested on Iluvatar CoreX MR-V100)；
 - data type support, float16 and bfloat16 for Ampere Nvidia GPUs;
-- support causal and non-causal modes.
+- support causal and non-causal modes;
 - support forward & backward modes;
 - the sequence length of k/v can be larger than that of q.
 
@@ -159,6 +211,6 @@ Headdim=128
 ## TODOs
 
 1. Test on other GPUs;
-2. Test on more triton versions 
-3. Improve performance of attention operators.
-2. Support other extensions to flash attention.
+2. Test on more triton versions；
+3. Improve performance of attention operators(especially for the backward op).
+4. Support other extensions to flash attention.
