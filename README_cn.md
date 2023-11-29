@@ -2,18 +2,25 @@
 
 [English](./README.md)
 
-FlagAttention 是一个用 Triton 语言实现的内存高效 Attention 算子项目。FlagAttention 受到 [FlashAttention](https://arxiv.org/abs/2205.14135) 和 [FlashAttention v2](https://tridao.me/publications/flash2/flash2.pdf) 的启发，并从大型语言建模研究的具体需求出发扩展它的功能。FlashAttention 和 FlashAttention-2 可以节省内存占用和访存以提高内存效率，但要对它们进行修改，添加更多选项和功能，则需要熟练的 cuda 编程技能。因此，FlagAttention 使用 Triton 来语言实现，它更便于编写自定义 GPU kernel。
 
-FlagAttention 提供的算子具有和 FlashAttention 相似的访存高效、运行速度快的特点，可以支持大语言模型在长文本上的训练和推理。作为开箱即用的高效 Attention 算子库，FlagAttention 寻求高效和泛用性之间的平衡点，对基础功能进行扩展，而不是针对某个特定模型为其适配所有细节。目前其中的 PiecewiseAttention 用于 [Aquila 34B](https://github.com/FlagAI-Open/Aquila2) 模型的推理，但这个算子也可以用于其他模型。
+FlagAttention 是一个用 Triton 语言(https://github.com/openai/triton)实现的内存高效 Attention 算子项目。FlagAttention 由语言模型中对非标准 attention 算子的需求驱动，对 multihead attention 算子进行扩展。
 
-如果需要更多的定制和修改，FlagAttention 中的算子实现也可以作为参考或修改的起点。
+FlagAttention 和 [FlashAttention](https://arxiv.org/abs/2205.14135) 和 [FlashAttention v2](https://tridao.me/publications/flash2/flash2.pdf) 一样内存高效，可以节省内存占用和访存。因为使用 Triton 语言实现，它更容易理解和修改。原版的 CUDA 实现的 [FlashAttention](https://github.com/Dao-AILab/flash-attention) 提供了如何设计算法以考虑不同内存层级的良好范例。通过分块和重计算的技巧， FlashAttention 避免了实体化 attention score 这个容量和文本长度的平方成正比的中间变量。但是使用 FlashAttention 的时候，无法对 attention score 进行自定义的变换，除非这个变换本身就被 FlashAttention 支持。对 FlashAttention 算子进行扩展需要熟练的 CUDA 编程技巧， 但用 Triton 语言实现的 FlagAttention 则更好修改。
+
+FlagAttention 目前提供了两个算子。
+
+1. flash_attention. 用 Triton 语言实现的 FlashAttention.
+2. piecewise_attention. 这个算子用于实现 NLPE(non linear position embedding)，目前用于 [Aquila-2-34B](https://github.com/FlagAI-Open/Aquila2) 模型的训练和推理。
+
+如果需要更多的定制，FlagAttention 中的算子实现也可以作为参考。
 
 ## 依赖
 
 FlagAttention 依赖 Torch 和 Triton。 为了使用 Triton 的新功能，建议使用 nightly 版。
 
-安装 Torch nightly 的指令可见 https://pytorch.org/get-started/locally/, Triton 现在是 Torch nightly 的依赖，所以可以自动随 Torch 安装。
-
+```sh
+pip install -U --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/Triton-Nightly/pypi/simple/ triton-nightly
+```
 FlagAttention 需要 Ampere 架构的 Nvidia GPU (e.g. A100, RTX-3090, ...) 以及 CUDA Toolkit 11.6 及以上的版本运行。其他的 GPU 可能也能运行，但暂未测试。
 
 ## 安装
@@ -63,7 +70,7 @@ FlagAttention 提供了自定义的 attention 算子。当一个算子的功能�
 
 ## 运行测试
 
-需要较新版本的 `pytest`(>=7.1.0) 以运行 `tests/` 中的测试。FlagAttention 中的运算符针对 PyTorch 中的[参考实现](src/flag_attn/testing) 进行测试，包括前向和反向。对于支持 `float16` 和 `bfloat16` 数据类型的算子，测试中包含了三种实现用于对比。
+需要较新版本的 `pytest`(>=7.1.0) 以运行 `tests/` 中的测试。FlagAttention 中的运算符以 `flag_attn.testing` 中的 PyTorch [参考实现](src/flag_attn/testing) 为参考进行测试，包括前向和反向。对于支持 `float16` 和 `bfloat16` 数据类型的算子，测试中包含了三种实现用于对比。
 
 1. 作为参考的是高精度的 PyTorch 实现 (下面称为 reference 实现) 。输入被转换为 `float32` 类型进行运算，再将结果转换为 `float16` 或 `bfloat16` 类型。
 2. 算子的 Triton 实现一般使用 `float16` 或 `bfloat16` 作为矩阵乘(mma)的输入类型，而使用 float32 作为矩阵乘的输出类型，以及其他运算的计算类型。
@@ -81,13 +88,25 @@ pytest .
 
 我们对比了算子的 Triton 实现和 PyTorch 参考实现的性能。当输入规模较大时，PyTorch 参考实现会遇到内存不足的问题，这种情况下，FLOPs/s 记为 0.
 
-我们也提供在相同输入规模下的 `Flash Attention v2` (https://github.com/Dao-AILab/flash-attention, v2.2.3) 的速度作为性能参考。但由于 FlagAttention 中的算子和 FlashAttention 有一定差别，因此即使批量大小、序列长度、头部数量、头部尺寸和其他配置相同，计算总量也会有所不同。
+```sh
+cd benchmarks/
+python flash_benchmark.py
+python piecewise_benchmark.py
+```
 
 ## 算子
 
-### Piecewise Attention
+### flash_attention
 
-对 Flash Attention 的第一个扩展是 [piecewise attention](src/flag_attn/piecewise.py).
+Triton 语言实现的 FlashAttention, 接口如下。
+
+```python
+flash_attention(q, k, v, causal=False, sm_scale=None)
+```
+
+### piecewise_attention
+
+对 FlashAttention 的第一个扩展是 [piecewise attention](src/flag_attn/piecewise.py).
 
 接口如下：
 
@@ -95,17 +114,18 @@ pytest .
 piecewise_attention(q1, k1, q2, k2, v, dist_threshold, softmax_scale=None, causal=False)
 ```
 
-它被命名为 piecewise_attention (分段 attention)，因为在通过 softmax 得到 attention weights (P) 之前，它需要两个`q` 和两个 `k` 来计算 attention score (S)。这样的设计源于具有旋转位置嵌入的 Transformer 不擅长预测比训练集中更长的序列。当距离大于训练集中的最大序列长度时，这样的 (q,k) 对会得到较高的 attention score，这是不符合预期的现象。解决这个问题的一种方式是设定一个距离阈值，根据取 `q` 和 `k` 之间的距离是否大于阈值，以不同的方式计算 attention score。
+它被命名为 piecewise_attention (分段 attention)，因为在通过 softmax 得到 attention weights (P) 之前，它需要两个 `q` 和两个 `k` 来计算 attention score (S)。这样的设计源于具有旋转位置嵌入的 Transformer 不擅长预测比训练集中更长的序列。当距离大于训练集中的最大序列长度时，这样的 (q,k) 对会得到较高的 attention score，这是不符合预期的现象。解决这个问题的一种方式是设定一个距离阈值，根据 `q` 和 `k` 之间的距离是否大于阈值，以不同的方式计算 attention score。
 
-在实践中，可以先对 `q` 和 `k`用两种不同的方式进行预处理，以获得 `q1, q2` 和 `k1, k2`。然后，根据取 `q` 和 `k` 之间的距离是否大于阈值，选择使用 `q1, k1` 或者 `q2, k2` 计算内积。
+BAAI 团队提出的 NLPE(non linear position embedding)算法先对 `q` 和 `k` 施加两种不同的位置编码，以获得 `q1, q2` 和 `k1, k2`。然后，根据 `q` 和 `k` 之间的距离是否大于阈值，选择使用 `q1, k1` 或者 `q2, k2` 计算内积。
 
 ![piecewise attention](assets/piecewise_attention.png)
 
 #### 使用示例
 
 ```python
+# piecewise_attention
 import torch
-from flag_attn import piecewise_attn
+from flag_attn import piecewise_attention
 
 B, H, T, D = 2, 16, 8192, 128
 dist_threshold = T // 2
@@ -115,7 +135,7 @@ q2 = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0").requires_gr
 k1 = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0").requires_grad_()
 k2 = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0").requires_grad_()
 v = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0").requires_grad_()
-o = piecewise_attn(q1, k1, q2, k2, v, dist_threshold, causal=True)
+o = piecewise_attention(q1, k1, q2, k2, v, dist_threshold, causal=True)
 print(o)
 
 go = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0")
@@ -125,22 +145,52 @@ gq1, gk1, gq2, gk2, gv = torch.autograd.grad(
 print(gq1)
 ```
 
+```python
+# flash_attention
+import torch
+from flag_attn import flash_attention
+
+B, H, T, D = 2, 16, 8192, 128
+
+q = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0").requires_grad_()
+k = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0").requires_grad_()
+v = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0").requires_grad_()
+o = flash_attention(q, k, v, causal=True)
+print(o)
+
+go = torch.randn((B, H, T, D), dtype=torch.float16, device="cuda:0")
+gq, gk, gv = torch.autograd.grad(
+    o, (q, k, v), go
+)
+print(gq)
+```
+
 #### 性能
 
-下面展示 A100 上使用 causal 模式的 piecewise_attention 的正向和反向算子的性能。测试参数如下：
+性能测试条件如下：
 
 1. seqlen 为 `[512, 1k, 2k, 4k, 16k, 32k]`;
 2. batch size 为 `32k / seqlen`;
 3. headdim 为 `[64, 128]`；
 4. num_heads 为 `2048 / headdim`.
 
-Headdim=64
-![headdim64, A100, causal](./assets/headdim64-causal-A100.png)
+##### flash_attention
 
----
+在使用 causal masking 条件下， flash_attention 算子性能如下：
 
-Headdim=128
-![headdim128, A100, causal](./assets/headdim128-causal-A100.png)
+![headdim64](./assets/v0.2/flash_attention_d64.png)
+
+![headdim128](./assets/v0.2/flash_attention.png)
+
+前向算子和 FlashAttention(CUDA) 一样快，甚至在某些情况下比 FlashAttention(CUDA)更快。但反向算子比 FlashAttention 慢。一开始的实现中，我们依照论文中的实现，使用原子加的方式更新 q 的梯度，但这样运行非常慢。所以我们将反向的 kernel 分成两个，一个用来计算 k&v 的梯度，一个用来计算 q 的梯度。这避免了原子加，但是增加了更多的重计算。这样的修改将反向算子速度提升到了 4~5 倍，但仍然比 FlashAttention 慢。
+
+相同的技巧也用在了 piecewise_attention 上。
+
+##### piecewise_attention
+
+相比 v0.1, piecewise_attention 算子的性能得到了提升。在 head dim 为 128 且使用 causal masking 的情况下，正向和反向算子的速度分别提升了 36% 和 9%.
+
+![piecewise_attention](./assets/v0.2/piecewise_attention.png)
 
 #### 特征
 
@@ -161,4 +211,4 @@ Headdim=128
 1. 在其他 GPU 上测试；
 2. 在更多 Triton 版本上进行测试；
 3. 提高算子的性能；
-2. 支持对 FlashAttention 的其他功能扩展。
+4. 支持对 FlashAttention 的其他功能扩展。
