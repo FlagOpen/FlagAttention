@@ -432,7 +432,7 @@ def _bwd_preprocess(
     if DIVISIBLE_M:
         o = tl.load(o_ptrs).to(tl.float32)
         do = tl.load(do_ptrs).to(tl.float32)
-    if not DIVISIBLE_M:
+    else:
         mask_m = off_m < M
         o = tl.load(o_ptrs, mask=mask_m[:, None]).to(tl.float32)
         do = tl.load(do_ptrs, mask=mask_m[:, None]).to(tl.float32)

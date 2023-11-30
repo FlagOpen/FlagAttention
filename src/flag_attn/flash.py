@@ -196,7 +196,7 @@ class FlashAttention(torch.autograd.Function):
             q.shape[0], q.shape[1], q.shape[2], P_SEQ, 
             BLOCK_M=BLOCK_M, BLOCK_DMODEL=D, BLOCK_N=BLOCK_N, CAUSAL=causal,
             DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
-            num_stages=num_stages, num_warps = num_warps,
+            num_stages=num_stages, num_warps=num_warps,
         )
 
         dq = torch.zeros_like(q) # us float32 for atomic updates
