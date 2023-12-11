@@ -72,11 +72,11 @@ FlagAttention 提供了自定义的 attention 算子。当一个算子的功能�
 
 需要较新版本的 `pytest`(>=7.1.0) 以运行 `tests/` 中的测试。FlagAttention 中的运算符以 `flag_attn.testing` 中的 PyTorch [参考实现](src/flag_attn/testing) 为参考进行测试，包括前向和反向。对于支持 `float16` 和 `bfloat16` 数据类型的算子，测试中包含了三种实现用于对比。
 
-1. 作为参考的是高精度的 PyTorch 实现 (下面称为 reference 实现) 。输入被转换为 `float32` 类型进行运算，再将结果转换为 `float16` 或 `bfloat16` 类型。
-2. 算子的 Triton 实现一般使用 `float16` 或 `bfloat16` 作为矩阵乘(mma)的输入类型，而使用 float32 作为矩阵乘的输出类型，以及其他运算的计算类型。
-3. 用于对比的实现是与 reference 逻辑相同的 PyTorch 实现，但计算精度和 Triton 实现一致。
+1. **Pytorch 参考实现**：在这个实现中，输入先被转换为 `float32` 类型，此后全程使用 `float32` 进行运算，再将结果转换为 `float16` 或 `bfloat16` 类型。
+2. **Triton 实现**: 算子的 Triton 实现，使用 `float16` 或 `bfloat16` 作为矩阵乘(MMA)的输入类型，而使用 `float32` 作为矩阵乘的输出类型，以及其他运算的计算类型。
+3. **Pytorch 实现**： 这个实现使用和 Pytorch 参考实现相同的运算，但计算精度和 Triton 实现一致。
 
-我们的测试要求在相同情况下，Triton 实现与 reference 实现之间的最大误差不大于 Pytorch 低精度实现与 reference 实现之间最大误差的两倍。
+我们的测试要求在相同情况下，Triton 实现与 Pytorch 参考实现之间的最大误差不大于 Pytorch 实现与 Pytorch 参考实现之间最大误差的两倍。
 
 ```sh
 pytest .
@@ -84,9 +84,9 @@ pytest .
 
 ## 运行性能测试
 
-项目中提供了性能基准测试来衡量算子所能达到的的 TFLOPs/s。FLOPs/s 用来作为衡量算子运行速度的指标。算子的浮点数运算总量 (FLOPs) 时，仅计算矩阵乘。总计算量除以运行时间的中位数，得到算子运行的 FLOPs/s。
+项目中提供了性能基准测试来衡量算子所能达到的的 TFLOPs/s。FLOPs/s 用来作为衡量算子运行速度的指标。算子的浮点数运算总量 (FLOPs) 仅考虑矩阵乘。总计算量除以运行时间的中位数，得到算子运行的 FLOPs/s。
 
-我们对比了算子的 Triton 实现和 PyTorch 参考实现的性能。当输入规模较大时，PyTorch 参考实现会遇到内存不足的问题，这种情况下，FLOPs/s 记为 0.
+我们对比了算子的 Triton 实现和 PyTorch 实现的性能。当输入规模较大时，PyTorch 参考实现会遇到内存不足的问题，这种情况下，FLOPs/s 记为 0.
 
 ```sh
 cd benchmarks/
@@ -106,17 +106,19 @@ flash_attention(q, k, v, causal=False, sm_scale=None)
 
 ### piecewise_attention
 
-对 FlashAttention 的第一个扩展是 [piecewise attention](src/flag_attn/piecewise.py).
+对 FlashAttention 的第一个扩展是 [piecewise attention](src/flag_attn/piecewise.py). 该算子增强了 FlashAttention 的功能：使用两个 `q` 和两个 `k` 来计算 attention score(S) ，然后使用 softmax 来计算 attention weight(P).
+
+这个设计源于具有旋转位置编码的 Transformer 模型在预测的序列长度超过其最大训练序列长度时存在困难。当距离超过训练集中最大序列长度是，这样的 (q,k) 对会得到较高的 attention score，这是不符合预期的现象。
+
+为了解决这个，BAAI提出了 NLPE(Non-Linearized Position Embedding, 非线性位置编码)。该方法根据q和k之间的距离是否超过预定义的阈值，为q和k应用两个不同的位置嵌入，产生q1, q2和k1, k2。然后，根据q和k之间的距离，注意力得分计算为q1, k1或q2, k2的点积。
 
 接口如下：
+
+![piecewise_attention_interface](./assets/piecewise_attention_interface.png)
 
 ```python
 piecewise_attention(q1, k1, q2, k2, v, dist_threshold, softmax_scale=None, causal=False)
 ```
-
-它被命名为 piecewise_attention (分段 attention)，因为在通过 softmax 得到 attention weights (P) 之前，它需要两个 `q` 和两个 `k` 来计算 attention score (S)。这样的设计源于具有旋转位置嵌入的 Transformer 不擅长预测比训练集中更长的序列。当距离大于训练集中的最大序列长度时，这样的 (q,k) 对会得到较高的 attention score，这是不符合预期的现象。解决这个问题的一种方式是设定一个距离阈值，根据 `q` 和 `k` 之间的距离是否大于阈值，以不同的方式计算 attention score。
-
-BAAI 团队提出的 NLPE(non linear position embedding)算法先对 `q` 和 `k` 施加两种不同的位置编码，以获得 `q1, q2` 和 `k1, k2`。然后，根据 `q` 和 `k` 之间的距离是否大于阈值，选择使用 `q1, k1` 或者 `q2, k2` 计算内积。
 
 ![piecewise attention](assets/piecewise_attention.png)
 
@@ -182,7 +184,7 @@ print(gq)
 
 ![headdim128](./assets/v0.2/flash_attention.png)
 
-前向算子和 FlashAttention(CUDA) 一样快，甚至在某些情况下比 FlashAttention(CUDA)更快。但反向算子比 FlashAttention 慢。一开始的实现中，我们依照论文中的实现，使用原子加的方式更新 q 的梯度，但这样运行非常慢。所以我们将反向的 kernel 分成两个，一个用来计算 k&v 的梯度，一个用来计算 q 的梯度。这避免了原子加，但是增加了更多的重计算。这样的修改将反向算子速度提升到了 4~5 倍，但仍然比 FlashAttention 慢。
+前向算子和 FlashAttention(CUDA) 一样快，甚至在某些情况下比 FlashAttention(CUDA)更快。但反向算子比 FlashAttention 慢。一开始的实现中，我们依照论文中的使用原子加的方式更新 q 的梯度，但这样运行非常慢。所以我们将反向的 kernel 分成两个，一个用来计算 k&v 的梯度，一个用来计算 q 的梯度。这避免了原子加运算，但是增加了更多的重计算。这样的修改将反向算子速度提升到了 4~5 倍，但仍然比 FlashAttention 慢。
 
 相同的技巧也用在了 piecewise_attention 上。
 
