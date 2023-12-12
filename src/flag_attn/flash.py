@@ -274,10 +274,13 @@ def _fwd_kernel(
     if DIVISIBLE_M:
         q = tl.load(q_ptrs, cache_modifier=".cg")
     else:
-        mask_m = offs_m < N_CTX
-        q = tl.load(q_ptrs, mask=mask_m[:, None], cache_modifier=".cg")
+        # apply mask only to last block, the one with boundary
+        mask_m = None
+        if start_m * BLOCK_M + BLOCK_M > N_CTX:
+            mask_m = offs_m < N_CTX
+        q = tl.load(q_ptrs, mask=mask_m[:, None] if mask_m is not None else None, cache_modifier=".cg")
     
-    #Dot I trick: to place q in registers, it saves shared memory
+    # Dot I trick: to place q in registers, it saves shared memory
     if BLOCK_DMODEL < 128:
         I = tl.where(offs_k[:, None] == offs_k,
                      tl.full((BLOCK_DMODEL, BLOCK_DMODEL), 1.0, dtype=input_dtype),
@@ -307,15 +310,18 @@ def _fwd_kernel(
             k = tl.load(k_ptrs, cache_modifier=".cg")
             v = tl.load(v_ptrs, cache_modifier=".cg")
         else:
-            mask_n = offs_n < (N_CTX + P_SEQ)
-            k = tl.load(k_ptrs, mask=mask_n[None, :], cache_modifier=".cg")
-            v = tl.load(v_ptrs, mask=mask_n[:, None], cache_modifier=".cg")
+            # apply mask only to last block, the one with boundary
+            mask_n = None
+            if start_n + BLOCK_N > N_CTX + P_SEQ:
+                mask_n = offs_n < (N_CTX + P_SEQ)
+            k = tl.load(k_ptrs, mask=mask_n[None, :] if mask_n is not None else None, cache_modifier=".cg")
+            v = tl.load(v_ptrs, mask=mask_n[:, None] if mask_n is not None else None, cache_modifier=".cg")
 
         # -- compute qk ---
         s = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         s += tl.dot(q, k)
         
-        if not DIVISIBLE_N:
+        if not DIVISIBLE_N and mask_n is not None:
             s = tl.where(mask_n[None, :], s, float("-inf"))
         if IS_CAUSAL:
             causal_mask = (P_SEQ + offs_m[:, None]) >= offs_n[None, :]
@@ -344,8 +350,8 @@ def _fwd_kernel(
         tl.store(l_ptrs, l, cache_modifier=".cg")
         tl.store(o_ptrs, acc.to(input_dtype), cache_modifier=".cg")
     else:
-        tl.store(l_ptrs, l, mask=mask_m, cache_modifier=".cg")
-        tl.store(o_ptrs, acc.to(input_dtype), mask=mask_m[:, None], cache_modifier=".cg")
+        tl.store(l_ptrs, l, mask=mask_m if mask_m is not None else None, cache_modifier=".cg")
+        tl.store(o_ptrs, acc.to(input_dtype), mask=mask_m[:, None] if mask_m is not None else None, cache_modifier=".cg")
 
 
 
@@ -367,7 +373,8 @@ def _bwd_preprocess(
     Delta += off_z * stride_dz + off_h * stride_dh
 
     # compute (Out * Dout).sum() for vector interpretation
-    off_m = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)        
+    off_m_base = tl.program_id(0) * BLOCK_M
+    off_m = off_m_base + tl.arange(0, BLOCK_M)
     off_n = tl.arange(0, D_HEAD)
 
     # load
@@ -378,9 +385,11 @@ def _bwd_preprocess(
         o = tl.load(o_ptrs).to(tl.float32)
         do = tl.load(do_ptrs).to(tl.float32)
     if not DIVISIBLE_M:
-        mask_m = off_m < M
-        o = tl.load(o_ptrs, mask=mask_m[:, None]).to(tl.float32)
-        do = tl.load(do_ptrs, mask=mask_m[:, None]).to(tl.float32)
+        mask_m = None
+        if off_m_base + BLOCK_M > M:
+            mask_m = off_m < M
+        o = tl.load(o_ptrs, mask=mask_m[:, None] if mask_m is not None else None).to(tl.float32)
+        do = tl.load(do_ptrs, mask=mask_m[:, None] if mask_m is not None else None).to(tl.float32)
     
     # compute
     delta = tl.sum(o * do, axis=1)
@@ -389,7 +398,7 @@ def _bwd_preprocess(
     if DIVISIBLE_M:
         tl.store(d_ptrs, delta)
     else:
-        tl.store(d_ptrs, delta, mask=mask_m)
+        tl.store(d_ptrs, delta, mask=mask_m if mask_m is not None else None)
 
 
 @triton.jit
@@ -456,9 +465,11 @@ def _bwd_kv_kernel(
         v = tl.load(v_ptrs)
         k = tl.load(k_ptrs)
     else:
-        mask_n = offs_n < (N_CTX + P_SEQ)
-        v = tl.load(v_ptrs, mask=mask_n[:, None])
-        k = tl.load(k_ptrs, mask=mask_n[:, None])
+        mask_n = None
+        if start_n * BLOCK_N + BLOCK_N > N_CTX + P_SEQ:
+            mask_n = offs_n < (N_CTX + P_SEQ)
+        v = tl.load(v_ptrs, mask=mask_n[:, None] if mask_n is not None else None)
+        k = tl.load(k_ptrs, mask=mask_n[:, None] if mask_n is not None else None)
 
     # initialize dk amd dv
     dk = tl.zeros([BLOCK_N, BLOCK_DMODEL], dtype=tl.float32)
@@ -474,9 +485,11 @@ def _bwd_kv_kernel(
         if DIVISIBLE_M:
             q = tl.load(q_ptrs)
         else:
-            mask_m = offs_m < N_CTX
-            valid_mask = mask_m[:, None] # & mask_n
-            q = tl.load(q_ptrs, mask=mask_m[:, None])
+            mask_m, valid_mask = None, None
+            if start_m + BLOCK_M > N_CTX:
+                mask_m = offs_m < N_CTX
+                valid_mask = mask_m[:, None] # & mask_n
+            q = tl.load(q_ptrs, mask=mask_m[:, None] if mask_m is not None else None)
         # recompute p = softmax(qk * sm_scale, dim=-1)
         s = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         s += tl.dot(q, tl.trans(k))
@@ -491,10 +504,10 @@ def _bwd_kv_kernel(
         if DIVISIBLE_M:
             l = tl.load(L + offs_m)
         else:
-            l = tl.load(L + offs_m, mask=mask_m)
+            l = tl.load(L + offs_m, mask=mask_m if mask_m is not None else None)
         p = tl.math.exp2(s * qk_scale - l[:, None] * log2e) # (BLOCK_M, BLOCK_N)
 
-        if not DIVISIBLE_M:
+        if not DIVISIBLE_M and valid_mask is not None:
             p = tl.where(valid_mask, p, 0.0)
         if CAUSAL:
             p = tl.where(causal_mask, p, 0.0)
@@ -503,21 +516,21 @@ def _bwd_kv_kernel(
         if DIVISIBLE_M:
             do = tl.load(do_ptrs)
         else:
-            do = tl.load(do_ptrs, mask=mask_m[:, None]) # (BLOCK_M, BLOCK_DMODEL)
-        dv += tl.dot(tl.trans(p.to(do.dtype)), do) # (BLOCK_N, BLOCK_DMODEL)  # still correct
+            do = tl.load(do_ptrs, mask=mask_m[:, None] if mask_m is not None else None)  # (BLOCK_M, BLOCK_DMODEL)
+        dv += tl.dot(tl.trans(p.to(do.dtype)), do)  # (BLOCK_N, BLOCK_DMODEL)  # still correct
 
         # compute dp = dot(v, do)
         if DIVISIBLE_M:
             delta = tl.load(D + offs_m)
         else:
-            delta = tl.load(D + offs_m, mask=mask_m)
+            delta = tl.load(D + offs_m, mask=mask_m if mask_m is not None else None)
         dp = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         dp += tl.dot(do, tl.trans(v))
 
         # compute ds = p * (dp - delta[:, None])
         ds = p * (dp - delta[:, None]) # (BLOCK_M, BLOCK_N)
 
-        if not DIVISIBLE_M:
+        if not DIVISIBLE_M and valid_mask is not None:
             ds = tl.where(valid_mask, ds, 0.0)
         if CAUSAL:
             ds = tl.where(causal_mask, ds, 0.0)
@@ -532,11 +545,11 @@ def _bwd_kv_kernel(
 
     dk *= sm_scale
     if DIVISIBLE_N:
-        tl.store(dk_ptrs, dk.to(input_dtype)) # (BLOCK_N, BLOCK_DMODEL)
-        tl.store(dv_ptrs, dv.to(input_dtype)) # (BLOCK_N, BLOCK_DMODEL,)
+        tl.store(dk_ptrs, dk.to(input_dtype))  # (BLOCK_N, BLOCK_DMODEL)
+        tl.store(dv_ptrs, dv.to(input_dtype))  # (BLOCK_N, BLOCK_DMODEL,)
     else:
-        tl.store(dk_ptrs, dk.to(input_dtype), mask=mask_n[:, None]) # (BLOCK_N, BLOCK_DMODEL)
-        tl.store(dv_ptrs, dv.to(input_dtype), mask=mask_n[:, None]) # (BLOCK_N, BLOCK_DMODEL,)
+        tl.store(dk_ptrs, dk.to(input_dtype), mask=mask_n[:, None] if mask_n is not None else None)  # (BLOCK_N, BLOCK_DMODEL)
+        tl.store(dv_ptrs, dv.to(input_dtype), mask=mask_n[:, None] if mask_n is not None else None)  # (BLOCK_N, BLOCK_DMODEL,)
 
 
 @triton.jit
@@ -584,12 +597,12 @@ def _bwd_q_kernel(
     offs_k = tl.arange(0, BLOCK_DMODEL)
 
     # initialize pointers to value-like data 
-    q_ptrs = Q + (offs_m[:, None] * stride_qm + offs_k[None, :] * stride_qk) # (BLOCK_M, BLOCK_DMODEL)
-    k_ptrs = K + (offs_n_init[:, None] * stride_kn + offs_k[None, :] * stride_kk) # (BLOCK_N, BLOCK_DMODEL)
-    v_ptrs = V + (offs_n_init[:, None] * stride_vn + offs_k[None, :] * stride_vk) # (BLOCK_N, BLOCK_DMODEL)
+    q_ptrs = Q + (offs_m[:, None] * stride_qm + offs_k[None, :] * stride_qk)  # (BLOCK_M, BLOCK_DMODEL)
+    k_ptrs = K + (offs_n_init[:, None] * stride_kn + offs_k[None, :] * stride_kk)  # (BLOCK_N, BLOCK_DMODEL)
+    v_ptrs = V + (offs_n_init[:, None] * stride_vn + offs_k[None, :] * stride_vk)  # (BLOCK_N, BLOCK_DMODEL)
 
-    dq_ptrs = DQ + (offs_m[:, None] * stride_dqm + offs_k[None, :] * stride_dqk) # (BLOCK_M, BLOCK_DMODEL)
-    do_ptrs = DO + (offs_m[:, None] * stride_dom + offs_k[None, :] * stride_dok) # (BLOCK_M, BLOCK_DMODEL)
+    dq_ptrs = DQ + (offs_m[:, None] * stride_dqm + offs_k[None, :] * stride_dqk)  # (BLOCK_M, BLOCK_DMODEL)
+    do_ptrs = DO + (offs_m[:, None] * stride_dom + offs_k[None, :] * stride_dok)  # (BLOCK_M, BLOCK_DMODEL)
 
     # pointer to row-wise quantities in value-like data
     d_ptrs = D + offs_m
@@ -602,11 +615,14 @@ def _bwd_q_kernel(
         delta = tl.load(d_ptrs)
         l = tl.load(l_ptrs)
     else:
-        mask_m = offs_m < N_CTX
-        q = tl.load(q_ptrs, mask=mask_m[:, None])
-        do = tl.load(do_ptrs, mask=mask_m[:, None])
-        delta = tl.load(d_ptrs, mask=mask_m)
-        l = tl.load(l_ptrs, mask=mask_m)
+        # apply mask only to last block, the one with boundary
+        mask_m = None
+        if start_m * BLOCK_M + BLOCK_M > N_CTX:
+            mask_m = offs_m < N_CTX % BLOCK_M
+        q = tl.load(q_ptrs, mask=mask_m[:, None] if mask_m is not None else None)
+        do = tl.load(do_ptrs, mask=mask_m[:, None] if mask_m is not None else None)
+        delta = tl.load(d_ptrs, mask=mask_m if mask_m is not None else None)
+        l = tl.load(l_ptrs, mask=mask_m if mask_m is not None else None)
 
     # initialize dq 
     dq = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
@@ -623,9 +639,12 @@ def _bwd_q_kernel(
             v = tl.load(v_ptrs)
             k = tl.load(k_ptrs)
         else:
-            mask_n = offs_n < (N_CTX + P_SEQ)
-            v = tl.load(v_ptrs, mask=mask_n[:, None])
-            k = tl.load(k_ptrs, mask=mask_n[:, None])
+            # apply mask only to last block, the one with boundary
+            mask_n = None
+            if offs_n + BLOCK_N > N_CTX + P_SEQ:
+                mask_n = offs_n < (N_CTX + P_SEQ)
+            v = tl.load(v_ptrs, mask=mask_n[:, None] if mask_n is not None else None)
+            k = tl.load(k_ptrs, mask=mask_n[:, None] if mask_n is not None else None)
 
 
         # recompute p = softmax(qk * sm_scale, dim=-1)
@@ -658,7 +677,7 @@ def _bwd_q_kernel(
         ds = p * (dp - delta[:, None]) # (BLOCK_M, BLOCK_N)
 
         # mask ds to ensure no small values
-        if not DIVISIBLE_N:
+        if not DIVISIBLE_N and valid_mask is not None:
             ds = tl.where(valid_mask, ds, 0.0)
         if CAUSAL:
             ds = tl.where(causal_mask, ds, 0.0)
@@ -673,4 +692,4 @@ def _bwd_q_kernel(
     if DIVISIBLE_M:
         tl.store(dq_ptrs, dq.to(input_dtype))
     else:
-        tl.store(dq_ptrs, dq.to(input_dtype), mask=mask_m[:, None])
+        tl.store(dq_ptrs, dq.to(input_dtype), mask=mask_m[:, None] if mask_m is not None else None)
