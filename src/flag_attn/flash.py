@@ -2,11 +2,19 @@ import math
 import torch
 import triton
 import triton.language as tl
-
+from typing import Optional
 
 class FlashAttention(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q, k, v, causal, sm_scale):
+    def forward(
+        ctx,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        causal: bool,
+        sm_scale: float,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         # switch device context
         orginal_device_index = torch.cuda.current_device()
         device_index = q.device.index
@@ -90,19 +98,21 @@ class FlashAttention(torch.autograd.Function):
         o = torch.empty_like(q)
         L = torch.empty((B, H, M), device=q.device, dtype=torch.float32)
         _fwd_kernel[grid](
+            # TODO: add bias
             q, k, v, sm_scale,
             L, o,
             q.stride(0), q.stride(1), q.stride(2), q.stride(3),
             k.stride(0), k.stride(1), k.stride(2), k.stride(3),
             v.stride(0), v.stride(1), v.stride(2), v.stride(3),
             o.stride(0), o.stride(1), o.stride(2), o.stride(3),
+            # TODO: add bias.stride
             B, H, M, P_SEQ,
             BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_DMODEL=D, IS_CAUSAL=causal,
             DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n, 
             num_warps=num_warps, num_stages=num_stages,
         )
 
-        ctx.save_for_backward(q, k, v, o, L)
+        ctx.save_for_backward(q, k, v, bias, o, L)
         ctx.grid = grid
         ctx.sm_scale = sm_scale
         ctx.BLOCK_DMODEL = D
@@ -115,7 +125,7 @@ class FlashAttention(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, do):
-        q, k, v, o, L = ctx.saved_tensors
+        q, k, v, bias, o, L = ctx.saved_tensors
 
         # switching device context
         orginal_device_index = torch.cuda.current_device()
@@ -182,8 +192,13 @@ class FlashAttention(torch.autograd.Function):
 
         dk = torch.empty_like(k)
         dv = torch.empty_like(v)
+        dbias = None
+        if bias is not None:
+            dbias = torch.empty_like(bias)
+
         grid = (triton.cdiv(N, BLOCK_N), H, B)
         _bwd_kv_kernel[grid](
+            # TODO: add bias (needed to calc Softmax)
             q, k, v, sm_scale, do, 
             dk, dv,
             L, delta,
@@ -193,6 +208,7 @@ class FlashAttention(torch.autograd.Function):
             do.stride(0), do.stride(1), do.stride(2), do.stride(3),
             dk.stride(0), dk.stride(1), dk.stride(2), dk.stride(3),
             dv.stride(0), dv.stride(1), dv.stride(2), dv.stride(3),
+            # TODO: add bias.stride
             q.shape[0], q.shape[1], q.shape[2], P_SEQ, 
             BLOCK_M=BLOCK_M, BLOCK_DMODEL=D, BLOCK_N=BLOCK_N, CAUSAL=causal,
             DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
@@ -202,7 +218,8 @@ class FlashAttention(torch.autograd.Function):
         dq = torch.zeros_like(q) # us float32 for atomic updates
         grid = (triton.cdiv(M, BLOCK_M), H, B)
         _bwd_q_kernel[grid](
-            q, k, v, sm_scale, do, 
+            # TODO: add bias (needed to calc Softmax)
+            q, k, v, sm_scale, do,
             dq,
             L, delta,
             q.stride(0), q.stride(1), q.stride(2), q.stride(3),
@@ -210,16 +227,24 @@ class FlashAttention(torch.autograd.Function):
             v.stride(0), v.stride(1), v.stride(2), v.stride(3),
             do.stride(0), do.stride(1), do.stride(2), do.stride(3),
             dq.stride(0), dq.stride(1), dq.stride(2), dq.stride(3),
-            q.shape[0], q.shape[1], q.shape[2], P_SEQ, 
+            # TODO: add bias.stride
+            q.shape[0], q.shape[1], q.shape[2], P_SEQ,
             BLOCK_M=BLOCK_M, BLOCK_DMODEL=D, BLOCK_N=BLOCK_N, CAUSAL=causal,
             DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
             num_stages=num_stages, num_warps = num_warps,
         )
 
         torch.cuda.set_device(orginal_device_index)
-        return dq, dk, dv, None, None, None
+        return dq, dk, dv, None, None, None, dbias
 
-def attention(q, k, v, causal=False, sm_scale=None):
+def attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    causal: bool = False,
+    sm_scale: float = None,
+    bias: Optional[torch.Tensor] = None
+):
     return FlashAttention.apply(q, k, v, causal, sm_scale)
 
 
