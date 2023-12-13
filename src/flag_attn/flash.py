@@ -279,10 +279,14 @@ def _fwd_kernel(
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
 
     # mask on M is to be applied to last block if not divisible
-    mask_m = None
-    if not DIVISIBLE_M and start_m * BLOCK_M + BLOCK_M > N_CTX:
-        mask_m = offs_m < N_CTX
-
+    if not DIVISIBLE_M:
+        if start_m * BLOCK_M + BLOCK_M > N_CTX:
+            mask_m = offs_m < N_CTX
+        else: 
+            mask_m = None
+    else: 
+        mask_m = None
+    
     # load q
     q = tl.load(q_ptrs, mask=mask_m[:, None] if mask_m is not None else None, cache_modifier=".cg")
     
@@ -312,9 +316,13 @@ def _fwd_kernel(
         offs_n = start_n + offs_n_base
 
         # mask on N is to be applied to last block if not divisible
-        mask_n = None
-        if not DIVISIBLE_N and start_n + BLOCK_N > N_CTX + P_SEQ:
-            mask_n = offs_n < (N_CTX + P_SEQ)
+        if not DIVISIBLE_N: 
+            if start_n + BLOCK_N > N_CTX + P_SEQ:
+                mask_n = offs_n < (N_CTX + P_SEQ)
+            else: 
+                mask_n = None
+        else:
+            mask_n = None     
 
         # -- load k, v --
         k = tl.load(k_ptrs, mask=mask_n[None, :] if mask_n is not None else None, cache_modifier=".cg")
@@ -381,9 +389,13 @@ def _bwd_preprocess(
     do_ptrs = DO + off_m[:, None] * stride_dom + off_n[None, :] * stride_dok
 
     # mask on M is to be applied to last block if not divisible
-    mask_m = None
-    if not DIVISIBLE_M and off_m_base + BLOCK_M > M:
-        mask_m = off_m < M
+    if not DIVISIBLE_M: 
+        if off_m_base + BLOCK_M > M:
+            mask_m = off_m < M
+        else:
+            mask_m = None
+    else:
+        mask_m = None
 
     o = tl.load(o_ptrs, mask=mask_m[:, None] if mask_m is not None else None).to(tl.float32)
     do = tl.load(do_ptrs, mask=mask_m[:, None] if mask_m is not None else None).to(tl.float32)
@@ -455,9 +467,13 @@ def _bwd_kv_kernel(
     dk_ptrs = DK + (offs_n[:, None] * stride_dkn + offs_k[None, :] * stride_dkk) # (BLOCK_N, BLOCK_DMODEL)
 
     # mask on N is to be applied to last block if not divisible
-    mask_n = None
-    if not DIVISIBLE_N and start_n * BLOCK_N + BLOCK_N > N_CTX + P_SEQ:
-        mask_n = offs_n < (N_CTX + P_SEQ)
+    if not DIVISIBLE_N: 
+        if start_n * BLOCK_N + BLOCK_N > N_CTX + P_SEQ:
+            mask_n = offs_n < (N_CTX + P_SEQ)
+        else:
+            mask_n = None
+    else:
+        mask_n = None
 
     # k and v stay in SRAM throughout
     v = tl.load(v_ptrs, mask=mask_n[:, None] if mask_n is not None else None)
@@ -474,10 +490,16 @@ def _bwd_kv_kernel(
         causal_mask = (P_SEQ + offs_m[:, None]) >= (offs_n[None, :]) # (BLOCK_M, BLOCK_N)
 
         # mask on M is to be applied to last block if not divisible
-        mask_m, valid_mask = None, None
-        if not DIVISIBLE_M and start_m + BLOCK_M > N_CTX:
-            mask_m = offs_m < N_CTX
-            valid_mask = mask_m[:, None]  # & mask_n
+        if not DIVISIBLE_M: 
+            if start_m + BLOCK_M > N_CTX:
+                mask_m = offs_m < N_CTX
+                valid_mask = mask_m[:, None]  # & mask_n
+            else:
+                mask_m = None
+                valid_mask = mask_n
+        else:
+            mask_m = None
+            valid_mask = mask_n
 
         # load q1, k1, q2, k2, v, do on-chip
         q = tl.load(q_ptrs, mask=mask_m[:, None] if mask_m is not None else None)
@@ -588,9 +610,13 @@ def _bwd_q_kernel(
     l_ptrs = L + offs_m
 
     # mask on M is to be applied to last block if not divisible
-    mask_m = None
-    if not DIVISIBLE_M and start_m * BLOCK_M + BLOCK_M > N_CTX:
-        mask_m = offs_m < N_CTX % BLOCK_M
+    if not DIVISIBLE_M: 
+        if start_m * BLOCK_M + BLOCK_M > N_CTX:
+            mask_m = offs_m < N_CTX % BLOCK_M
+        else:
+            mask_m = None
+    else: 
+        mask_m = None
 
     # load q: it will stay in SRAM throughout
     q = tl.load(q_ptrs, mask=mask_m[:, None] if mask_m is not None else None)
@@ -609,11 +635,17 @@ def _bwd_q_kernel(
         offs_n = start_n + offs_n_base
 
         # mask on N is to be applied to last block if not divisible
-        mask_n, valid_mask = None, None
-        if not DIVISIBLE_N and start_n + BLOCK_N > N_CTX + P_SEQ:
-            mask_n = offs_n < (N_CTX + P_SEQ) % BLOCK_N
-            valid_mask = mask_n  # & mask_m[:, None]
-
+        if not DIVISIBLE_N: 
+            if start_n + BLOCK_N > N_CTX + P_SEQ:
+                mask_n = offs_n < (N_CTX + P_SEQ) % BLOCK_N
+                valid_mask = mask_n  # & mask_m[:, None]
+            else:
+                mask_n = None
+                valid_mask = None
+        else:
+            mask_n = None
+            valid_mask = None
+            
         # load k1, k2, v on chip
         v = tl.load(v_ptrs, mask=mask_n[:, None] if mask_n is not None else None)
         k = tl.load(k_ptrs, mask=mask_n[:, None] if mask_n is not None else None)
