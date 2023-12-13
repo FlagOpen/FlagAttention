@@ -140,7 +140,9 @@ class FlashAttention(torch.autograd.Function):
                 BLOCK_N = 64
                 num_stages = 3 if D <= 64 else 2
                 num_warps = 4
-        else: # tune for RTX-3090, device_capability(8, 6)
+
+        # tune for RTX-3090, device_capability(8, 6)
+        elif torch.cuda.get_device_capability(device_index) == (8, 6):
             if not causal:
                 if D <= 64:
                     BLOCK_M = 64
@@ -163,6 +165,12 @@ class FlashAttention(torch.autograd.Function):
                     BLOCK_N = 32
                     num_stages = 2
                     num_warps = 4
+        # default for non-ampere. ex: rtx 2080ti 12gb, device_capability(7, 5)
+        else:
+            BLOCK_M = 32
+            BLOCK_N = 32
+            num_stages = 2
+            num_warps = 4
         
         divisible_m = M % BLOCK_M == 0
         divisible_n = N % BLOCK_N == 0
@@ -427,7 +435,7 @@ def _bwd_kv_kernel(
     L += (off_z * H + off_h) * N_CTX
 
     if CAUSAL:
-        lo = tl.math.max(start_n * BLOCK_N - P_SEQ, 0)
+        lo = tl.math.max(start_n * BLOCK_N - P_SEQ, 0, propagate_nan=True)
         lo = (lo // BLOCK_M) * BLOCK_M
     else:
         lo = 0
