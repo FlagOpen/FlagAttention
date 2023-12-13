@@ -19,6 +19,8 @@ except BaseException:
         FLASH_VER = None
 HAS_FLASH = FLASH_VER is not None
 
+# suports from rtx 2060 12gb to A100/H100 80gb
+is_ampere = torch.cuda.get_device_capability()[0] >= 8
 
 configs = [triton.testing.Benchmark(
     x_names=['N_CTX'],
@@ -33,7 +35,7 @@ configs = [triton.testing.Benchmark(
 ) for mode in ['fwd', 'bwd'] 
     for causal in [False, True]
     for D_HEAD in [64, 128]
-    for dtype in [torch.float16, torch.bfloat16]]
+    for dtype in ([torch.float16, torch.bfloat16] if is_ampere else [torch.float16])]
 
 @triton.testing.perf_report(configs)
 def bench_flash_attention(N_CTX, D_HEAD, causal, mode, provider, dtype=torch.float16, device="cuda"):
