@@ -122,7 +122,6 @@ class FlashAttention(torch.autograd.Function):
         )
 
         ctx.save_for_backward(q, k, v, bias, o, L)
-        ctx.is_bias = bias is not None
         ctx.grid = grid
         ctx.sm_scale = sm_scale
         ctx.BLOCK_DMODEL = D
@@ -135,11 +134,7 @@ class FlashAttention(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, do):
-        if ctx.is_bias:
-            q, k, v, bias, o, L = ctx.saved_tensors
-        else: 
-            q, k, v, o, L = ctx.saved_tensors
-            bias = None
+        q, k, v, bias, o, L = ctx.saved_tensors
 
         # switching device context
         orginal_device_index = torch.cuda.current_device()
@@ -511,7 +506,7 @@ def _bwd_kv_kernel(
     L += (off_z * H + off_h) * N_CTX
 
     if CAUSAL:
-        lo = tl.math.max(start_n * BLOCK_N - P_SEQ, 0)
+        lo = tl.math.max(start_n * BLOCK_N - P_SEQ, 0, propagate_nan=True)
         lo = (lo // BLOCK_M) * BLOCK_M
     else:
         lo = 0
