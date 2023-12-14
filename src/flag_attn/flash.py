@@ -396,7 +396,7 @@ def _fwd_kernel(
         # -- compute scaling constant ---
         m_i_new = tl.maximum(m_i, tl.max(s, 1))
         alpha = tl.math.exp2((m_i - m_i_new) * log2e)
-        p = tl.math.exp2(s * log2e - m_i_new[:, None] * log2e)
+        p = tl.math.exp2((s - m_i_new[:, None]) * log2e)
 
         # -- scale and update acc: acc *= alpha[:, None]--
         acc *= alpha[:, None]
@@ -413,7 +413,7 @@ def _fwd_kernel(
 
     # write back l & o
     acc = acc * (1.0 / l_i[:, None])
-    l = m_i * sm_scale + tl.log(l_i) # log(normalizer)
+    l = m_i + tl.log(l_i) # log(normalizer)
     if DIVISIBLE_M:
         tl.store(l_ptrs, l, cache_modifier=".cg")
         tl.store(o_ptrs, acc.to(input_dtype), cache_modifier=".cg")
