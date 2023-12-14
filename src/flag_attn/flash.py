@@ -432,7 +432,7 @@ def _bwd_kv_kernel(
     L += (off_z * H + off_h) * N_CTX
 
     if CAUSAL:
-        lo = tl.math.max(start_n * BLOCK_N - P_SEQ, 0)
+        lo = tl.maximum(start_n * BLOCK_N - P_SEQ, 0)
         lo = (lo // BLOCK_M) * BLOCK_M
     else:
         lo = 0
