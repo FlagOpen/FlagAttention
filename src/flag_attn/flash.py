@@ -64,7 +64,8 @@ class FlashAttention(torch.autograd.Function):
                         BLOCK_N = 128
                         num_stages = 3
                         num_warps = 8
-        else: # tune for RTX-3090, device_capability(8, 6)
+        # tune for RTX-3090, device_capability(8, 6)
+        elif torch.cuda.get_device_capability(device_index) == (8, 6): 
             if not causal:
                 if Dk <= 64:
                     BLOCK_M = 128 
@@ -87,6 +88,11 @@ class FlashAttention(torch.autograd.Function):
                     BLOCK_N = 32
                     num_stages = 2
                     num_warps = 4
+        else: 
+            BLOCK_M = 32
+            BLOCK_N = 32
+            num_stages = 2
+            num_warps = 4
 
         divisible_m = M % BLOCK_M == 0
         divisible_n = N % BLOCK_N == 0
@@ -97,14 +103,19 @@ class FlashAttention(torch.autograd.Function):
         grid = (triton.cdiv(M, BLOCK_M), H, B)
         o = torch.empty_like(q)
         L = torch.empty((B, H, M), device=q.device, dtype=torch.float32)
+        print(f"running with bias: {bias is not None}")
         _fwd_kernel[grid](
             # TODO: add bias
-            q, k, v, sm_scale,
+            q, k, v, bias, sm_scale,
             L, o,
             q.stride(0), q.stride(1), q.stride(2), q.stride(3),
             k.stride(0), k.stride(1), k.stride(2), k.stride(3),
             v.stride(0), v.stride(1), v.stride(2), v.stride(3),
             o.stride(0), o.stride(1), o.stride(2), o.stride(3),
+            bias.stride(0) if bias is not None else 0, 
+            bias.stride(1) if bias is not None else 0,
+            bias.stride(2) if bias is not None else 0, 
+            bias.stride(3) if bias is not None else 0,
             # TODO: add bias.stride
             B, H, M, P_SEQ,
             BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_DMODEL=D, IS_CAUSAL=causal,
@@ -150,7 +161,8 @@ class FlashAttention(torch.autograd.Function):
                 BLOCK_N = 64
                 num_stages = 3 if D <= 64 else 2
                 num_warps = 4
-        else: # tune for RTX-3090, device_capability(8, 6)
+        # tune for RTX-3090, device_capability(8, 6)
+        elif torch.cuda.get_device_capability(device_index) == (8, 6):
             if not causal:
                 if D <= 64:
                     BLOCK_M = 64
@@ -173,9 +185,16 @@ class FlashAttention(torch.autograd.Function):
                     BLOCK_N = 32
                     num_stages = 2
                     num_warps = 4
+        # suport non-ampere arch (ex. rtx 2060)
+        else: 
+            BLOCK_M = 32
+            BLOCK_N = 32
+            num_stages = 2
+            num_warps = 4
         
         divisible_m = M % BLOCK_M == 0
         divisible_n = N % BLOCK_N == 0
+
 
         delta = torch.empty_like(L)
         grid = (triton.cdiv(M, BLOCK_M), H, B)
@@ -245,17 +264,18 @@ def attention(
     sm_scale: float = None,
     bias: Optional[torch.Tensor] = None
 ):
-    return FlashAttention.apply(q, k, v, causal, sm_scale)
+    return FlashAttention.apply(q, k, v, causal, sm_scale, bias)
 
 
 @triton.jit
 def _fwd_kernel(
-    Q, K, V, sm_scale,
+    Q, K, V, BIAS, sm_scale,
     L, O,
     stride_qz, stride_qh, stride_qm, stride_qk,
     stride_kz, stride_kh, stride_kn, stride_kk,
     stride_vz, stride_vh, stride_vn, stride_vk,
     stride_oz, stride_oh, stride_om, stride_ok,
+    stride_bz, stride_bh, stride_bm, stride_bn,
     Z, H, N_CTX, P_SEQ,
     BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr, 
     IS_CAUSAL: tl.constexpr,
@@ -271,12 +291,13 @@ def _fwd_kernel(
     # 2^x instead of exp in the loop because CSE and LICM
     # don't work as expected with `exp` in the loop
     log2e: tl.constexpr = 1.4426950408889634
-    qk_scale = sm_scale * log2e
 
     # offset pointers for (batch, head)
     Q += off_z * stride_qz + off_h * stride_qh
     K += off_z * stride_kz + off_h * stride_kh
     V += off_z * stride_vz + off_h * stride_vh
+    if BIAS is not None:
+        BIAS += off_z * stride_bz + off_h * stride_bh 
     O += off_z * stride_oz + off_h * stride_oh
     L += (off_z * H + off_h) * N_CTX # l's shape is (B, H, N_CTX)
 
@@ -302,7 +323,7 @@ def _fwd_kernel(
         mask_m = offs_m < N_CTX
         q = tl.load(q_ptrs, mask=mask_m[:, None], cache_modifier=".cg")
     
-    #Dot I trick: to place q in registers, it saves shared memory
+    # Dot I trick: to place q in registers, it saves shared memory
     if BLOCK_DMODEL < 128:
         I = tl.where(offs_k[:, None] == offs_k,
                      tl.full((BLOCK_DMODEL, BLOCK_DMODEL), 1.0, dtype=input_dtype),
@@ -323,6 +344,9 @@ def _fwd_kernel(
     offs_n_init = offs_n_base
     k_ptrs = K + (offs_k[:, None] * stride_vk + offs_n_init[None, :] * stride_vn) # (BLOCK_DMODEL, BLOCK_N)
     v_ptrs = V + (offs_n_init[:, None] * stride_kn + offs_k[None, :] * stride_kk) # (BLOCK_N, BLOCK_DMODEL)
+    if BIAS is not None:
+        bias_ptrs = BIAS + (offs_m[:, None] * stride_bm + offs_n_init[None, :] * stride_bn) # (BLOCK_M, BLOCK_N)
+
     for start_n in range(0, hi, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         offs_n = start_n + offs_n_base
@@ -338,7 +362,19 @@ def _fwd_kernel(
 
         # -- compute qk ---
         s = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-        s += tl.dot(q, k)
+        s += tl.dot(q, k) * sm_scale
+
+        if BIAS is not None: 
+            if DIVISIBLE_M and DIVISIBLE_N:
+                bias = tl.load(bias_ptrs)
+            elif DIVISIBLE_M and not DIVISIBLE_N:
+                bias = tl.load(bias_ptrs, mask=mask_n[None, :])
+            elif not DIVISIBLE_M and DIVISIBLE_N:
+                bias = tl.load(bias_ptrs, mask=mask_m[:, None])
+            else:
+                bias = tl.load(bias_ptrs, mask=mask_m[:, None] & mask_n[None, :])
+            s += bias
+            
         
         if not DIVISIBLE_N:
             s = tl.where(mask_n[None, :], s, float("-inf"))
@@ -348,8 +384,8 @@ def _fwd_kernel(
 
         # -- compute scaling constant ---
         m_i_new = tl.maximum(m_i, tl.max(s, 1))
-        alpha = tl.math.exp2((m_i - m_i_new) * qk_scale)
-        p = tl.math.exp2(s * qk_scale - m_i_new[:, None] * qk_scale)
+        alpha = tl.math.exp2((m_i - m_i_new) * log2e)
+        p = tl.math.exp2(s * log2e - m_i_new[:, None] * log2e)
 
         # -- scale and update acc: acc *= alpha[:, None]--
         acc *= alpha[:, None]
@@ -361,6 +397,8 @@ def _fwd_kernel(
         # update pointers
         k_ptrs += BLOCK_N * stride_kn
         v_ptrs += BLOCK_N * stride_vn
+        if BIAS is not None:
+            bias_ptrs += BLOCK_N * stride_bn
 
     # write back l & o
     acc = acc * (1.0 / l_i[:, None])
