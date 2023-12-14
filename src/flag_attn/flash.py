@@ -11,9 +11,9 @@ class FlashAttention(torch.autograd.Function):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        causal: bool,
-        sm_scale: float,
         bias: Optional[torch.Tensor] = None,
+        causal: bool = False,
+        sm_scale: float = None,
     ) -> torch.Tensor:
         # switch device context
         orginal_device_index = torch.cuda.current_device()
@@ -103,7 +103,6 @@ class FlashAttention(torch.autograd.Function):
         grid = (triton.cdiv(M, BLOCK_M), H, B)
         o = torch.empty_like(q)
         L = torch.empty((B, H, M), device=q.device, dtype=torch.float32)
-        print(f"running with bias: {bias is not None}")
         _fwd_kernel[grid](
             # TODO: add bias
             q, k, v, bias, sm_scale,
@@ -116,7 +115,6 @@ class FlashAttention(torch.autograd.Function):
             bias.stride(1) if bias is not None else 0,
             bias.stride(2) if bias is not None else 0, 
             bias.stride(3) if bias is not None else 0,
-            # TODO: add bias.stride
             B, H, M, P_SEQ,
             BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_DMODEL=D, IS_CAUSAL=causal,
             DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n, 
@@ -124,6 +122,7 @@ class FlashAttention(torch.autograd.Function):
         )
 
         ctx.save_for_backward(q, k, v, bias, o, L)
+        ctx.is_bias = bias is not None
         ctx.grid = grid
         ctx.sm_scale = sm_scale
         ctx.BLOCK_DMODEL = D
@@ -136,7 +135,11 @@ class FlashAttention(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, do):
-        q, k, v, bias, o, L = ctx.saved_tensors
+        if ctx.is_bias:
+            q, k, v, bias, o, L = ctx.saved_tensors
+        else: 
+            q, k, v, o, L = ctx.saved_tensors
+            bias = None
 
         # switching device context
         orginal_device_index = torch.cuda.current_device()
@@ -218,7 +221,7 @@ class FlashAttention(torch.autograd.Function):
         grid = (triton.cdiv(N, BLOCK_N), H, B)
         _bwd_kv_kernel[grid](
             q, k, v, bias, sm_scale, do, 
-            dk, dv,
+            dk, dv, dbias,
             L, delta,
             q.stride(0), q.stride(1), q.stride(2), q.stride(3),
             k.stride(0), k.stride(1), k.stride(2), k.stride(3),
@@ -243,7 +246,7 @@ class FlashAttention(torch.autograd.Function):
         dq = torch.zeros_like(q) # use float32 for atomic updates
         grid = (triton.cdiv(M, BLOCK_M), H, B)
         _bwd_q_kernel[grid](
-            q, k, v, sm_scale, do,
+            q, k, v, bias, sm_scale, do,
             dq,
             L, delta,
             q.stride(0), q.stride(1), q.stride(2), q.stride(3),
@@ -262,17 +265,17 @@ class FlashAttention(torch.autograd.Function):
         )
 
         torch.cuda.set_device(orginal_device_index)
-        return dq, dk, dv, None, None, None, dbias
+        return dq, dk, dv, dbias, None, None, None
 
 def attention(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
     causal: bool = False,
     sm_scale: float = None,
-    bias: Optional[torch.Tensor] = None
 ):
-    return FlashAttention.apply(q, k, v, causal, sm_scale, bias)
+    return FlashAttention.apply(q, k, v, bias, causal, sm_scale)
 
 
 @triton.jit
@@ -561,6 +564,17 @@ def _bwd_kv_kernel(
         s = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         s += tl.dot(q, tl.trans(k)) * sm_scale
 
+        if BIAS is not None: 
+            if DIVISIBLE_M and DIVISIBLE_N:
+                bias = tl.load(bias_ptrs)
+            elif DIVISIBLE_M and not DIVISIBLE_N:
+                bias = tl.load(bias_ptrs, mask=mask_n[None, :])
+            elif not DIVISIBLE_M and DIVISIBLE_N:
+                bias = tl.load(bias_ptrs, mask=mask_m[:, None])
+            else:
+                bias = tl.load(bias_ptrs, mask=mask_m[:, None] & mask_n[None, :])
+            s += bias
+
         # NOTE: since softmax in backward is pointwise, the normalizer has been saved in fwd)
         # So masking on s is not needed.
         # s = tl.where(valid_mask, s , float("-inf"))
@@ -606,9 +620,24 @@ def _bwd_kv_kernel(
         # compute dk = dot(ds.T, q) masking
         dk += tl.dot(tl.trans(ds), q)
 
+        if BIAS is not None: 
+            if DIVISIBLE_M and DIVISIBLE_N:
+                tl.store(dbias_ptrs, ds) # (BLOCK_M, BLOCK_N)
+            elif DIVISIBLE_M and not DIVISIBLE_N:
+                tl.store(dbias_ptrs, ds, mask=mask_n[None, :]) # (BLOCK_M, BLOCK_N)
+                bias = tl.load(bias_ptrs, mask=mask_n[None, :])
+            elif not DIVISIBLE_M and DIVISIBLE_N:
+                tl.store(dbias_ptrs, ds, mask=mask_m[:, None]) # (BLOCK_M, BLOCK_N)
+            else:
+                tl.store(dbias_ptrs, ds, mask=mask_m[:, None] & mask_n[None, :]) # (BLOCK_M, BLOCK_N)
+
         # increment pointers
         q_ptrs += BLOCK_M * stride_qm
         do_ptrs += BLOCK_M * stride_dom
+
+        if BIAS is not None: 
+            bias_ptrs += BLOCK_M * stride_bm
+            dbias_ptrs += BLOCK_M * stride_dbm
 
     dk *= sm_scale
     if DIVISIBLE_N:
@@ -646,7 +675,6 @@ def _bwd_q_kernel(
     # 2^x instead of exp in the loop because CSE and LICM
     # don't work as expected with `exp` in the loop
     log2e: tl.constexpr = 1.4426950408889634
-    qk_scale = sm_scale * log2e
 
     # offset pointers for (batch, head)
     Q += off_z * stride_qz + off_h * stride_qh
@@ -655,6 +683,9 @@ def _bwd_q_kernel(
     DO += off_z * stride_doz + off_h * stride_doh
     D += (off_z * H + off_h) * N_CTX
     L += (off_z * H + off_h) * N_CTX
+
+    if BIAS is not None:
+        BIAS += off_z * stride_bz + off_h * stride_bh
 
     # offset pointers for batch/head
     DQ += off_z * stride_dqz + off_h * stride_dqh
@@ -671,6 +702,9 @@ def _bwd_q_kernel(
 
     dq_ptrs = DQ + (offs_m[:, None] * stride_dqm + offs_k[None, :] * stride_dqk) # (BLOCK_M, BLOCK_DMODEL)
     do_ptrs = DO + (offs_m[:, None] * stride_dom + offs_k[None, :] * stride_dok) # (BLOCK_M, BLOCK_DMODEL)
+
+    if BIAS is not None:
+        bias_ptrs = BIAS + (offs_m[:, None] * stride_bm + offs_n_init[None, :] * stride_bn)
 
     # pointer to row-wise quantities in value-like data
     d_ptrs = D + offs_m
@@ -717,6 +751,17 @@ def _bwd_q_kernel(
         s = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         s += tl.dot(q, tl.trans(k)) * sm_scale
 
+        if BIAS is not None: 
+            if DIVISIBLE_M and DIVISIBLE_N:
+                bias = tl.load(bias_ptrs)
+            elif DIVISIBLE_M and not DIVISIBLE_N:
+                bias = tl.load(bias_ptrs, mask=mask_n[None, :])
+            elif not DIVISIBLE_M and DIVISIBLE_N:
+                bias = tl.load(bias_ptrs, mask=mask_m[:, None])
+            else:
+                bias = tl.load(bias_ptrs, mask=mask_m[:, None] & mask_n[None, :])
+            s += bias
+
         # NOTE: since softmax in backward is pointwise, the normalizer has been saved in fwd)
         # So masking on s is not needed.
         # if CAUSAL:
@@ -749,6 +794,8 @@ def _bwd_q_kernel(
         # increment pointers
         k_ptrs += BLOCK_N * stride_kn
         v_ptrs += BLOCK_N * stride_vn
+        if BIAS is not None:
+            bias_ptrs += BLOCK_N * stride_bn
     
     dq *= sm_scale
     if DIVISIBLE_M:
