@@ -493,7 +493,7 @@ def _bwd_kv_kernel(
     DV += off_z * stride_dvz + off_h * stride_dvh
 
     if CAUSAL:
-        lo = tl.math.max(start_n * BLOCK_N - P_SEQ, 0, propagate_nan=True)
+        lo = tl.maximum(start_n * BLOCK_N - P_SEQ, 0)
         lo = (lo // BLOCK_M) * BLOCK_M
     else:
         lo = 0
