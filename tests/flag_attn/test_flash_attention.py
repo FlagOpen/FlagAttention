@@ -29,17 +29,26 @@ def report(name, actual, expected):
     (1, 2, 8192, 16, 10),
     (1, 2, 8192, 32, 0),
 ])
-@pytest.mark.parametrize('bias', [True, False])
+@pytest.mark.parametrize('use_bias', [True, False])
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize('stride_order', ['BHTD', 'BTHD'])
-def test_attention_fwd(B, H, T, D, P_SEQ, bias, causal, stride_order, dtype, scale, device_id):
+def test_attention_fwd(B, H, T, D, P_SEQ, use_bias, causal, stride_order, dtype, scale, device_id):
+    # using bias requires O(N^2)
+    if use_bias and T > 4096: 
+        assert True
+        return
+    # using bfloat16 requires compute capability >= 8.
+    if torch.cuda.get_device_capability(device_id)[0] < 8 and dtype == torch.bfloat16: 
+        assert True
+        return
+    
     device = f"cuda:{device_id}"
     if stride_order == "BHTD":
         q = torch.empty((B, H, T, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
         k = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
         v = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
-        if bias: 
+        if use_bias: 
             bias = torch.empty((B, H, T, T+P_SEQ), dtype=dtype, device=device).normal_(mean=0., std=scale)
         else: 
             bias = None
@@ -47,8 +56,8 @@ def test_attention_fwd(B, H, T, D, P_SEQ, bias, causal, stride_order, dtype, sca
         q = torch.empty((B, T, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
         k = torch.empty((B, T + P_SEQ, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
         v = torch.empty((B, T + P_SEQ, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
-        if bias: 
-            bias = torch.empty((B, T, T+P_SEQ, H), dtype=dtype, device=device).normal_(mean=0., std=scale)
+        if use_bias: 
+            bias = torch.empty((B, H, T, T+P_SEQ), dtype=dtype, device=device).normal_(mean=0., std=scale)
         else: 
             bias = None
 
@@ -80,6 +89,15 @@ def test_attention_fwd(B, H, T, D, P_SEQ, bias, causal, stride_order, dtype, sca
 @pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize('stride_order', ['BHTD', 'BTHD'])
 def test_attention_fwd_bwd(B, H, T, D, P_SEQ, use_bias, causal, stride_order, dtype, scale, device_id):
+    # using bias requires O(N^2)
+    if use_bias and T > 4096: 
+        assert True
+        return
+    # using bfloat16 requires compute capability >= 8.
+    if torch.cuda.get_device_capability(device_id)[0] < 8 and dtype == torch.bfloat16: 
+        assert True
+        return
+
     device = f"cuda:{device_id}"
     if stride_order == "BHTD":
         q = torch.empty((B, H, T, D), dtype=dtype, device=device).normal_(mean=0., std=scale).requires_grad_()
@@ -87,7 +105,7 @@ def test_attention_fwd_bwd(B, H, T, D, P_SEQ, use_bias, causal, stride_order, dt
         v = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device=device).normal_(mean=0., std=scale).requires_grad_()
         do = torch.randn((B, H, T, D), dtype=dtype, device=device)
         if use_bias: 
-            bias = torch.empty((B, T, T+P_SEQ, H), dtype=dtype, device=device).normal_(mean=0., std=scale).requires_grad_()
+            bias = torch.empty((B, H, T, T+P_SEQ), dtype=dtype, device=device).normal_(mean=0., std=scale).requires_grad_()
         else: 
             bias = None
     else:
@@ -100,14 +118,14 @@ def test_attention_fwd_bwd(B, H, T, D, P_SEQ, use_bias, causal, stride_order, dt
         else:
             bias = None
     
-    o_ref = flag_attn.testing.flash_attention(q, k, v, causal=causal, upcast=True)
-    o_torch = flag_attn.testing.flash_attention(q, k, v, causal=causal, upcast=False)
-    o_hyp = flag_attn.flash_attention(q, k, v, causal=causal)
+    o_ref = flag_attn.testing.flash_attention(q, k, v, bias=bias, causal=causal, upcast=True)
+    o_torch = flag_attn.testing.flash_attention(q, k, v, bias=bias, causal=causal, upcast=False)
+    o_hyp = flag_attn.flash_attention(q, k, v, bias=bias, causal=causal)
 
-    if bias: 
-        gq_ref, gk_ref, gv_ref, gbias_ref = torch.autograd.grad(o_ref, (q, k, v), do)
-        gq_torch, gk_torch, gv_torch, gbias_torch = torch.autograd.grad(o_torch, (q, k, v), do)
-        gq_hyp, gk_hyp, gv_hyp, gbias_hyp = torch.autograd.grad(o_hyp, (q, k, v), do)
+    if use_bias: 
+        gq_ref, gk_ref, gv_ref, gbias_ref = torch.autograd.grad(o_ref, (q, k, v, bias), do)
+        gq_torch, gk_torch, gv_torch, gbias_torch = torch.autograd.grad(o_torch, (q, k, v, bias), do)
+        gq_hyp, gk_hyp, gv_hyp, gbias_hyp = torch.autograd.grad(o_hyp, (q, k, v, bias), do)
     else: 
         gq_ref, gk_ref, gv_ref = torch.autograd.grad(o_ref, (q, k, v), do)
         gq_torch, gk_torch, gv_torch = torch.autograd.grad(o_torch, (q, k, v), do)
@@ -124,7 +142,7 @@ def test_attention_fwd_bwd(B, H, T, D, P_SEQ, use_bias, causal, stride_order, dt
     gq_triton_max_diff = max_diff(gq_hyp, gq_ref)
     gk_triton_max_diff = max_diff(gk_hyp, gk_ref)
     gv_triton_max_diff = max_diff(gv_hyp, gv_ref)
-    if bias: 
+    if use_bias: 
         gbias_triton_max_diff = max_diff(gbias_hyp, gbias_ref)
 
     assert o_triton_max_diff < 2 * o_torch_max_diff + 1e-5
