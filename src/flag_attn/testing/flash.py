@@ -25,7 +25,7 @@ def attention(q, k, v, bias: Optional[torch.Tensor] = None, causal: bool = False
     if bias is None: 
         S = torch.matmul(q, k.transpose(2, 3)) * sm_scale
     else: 
-        S = torch.matmul(q, k.transpose(2, 3) + bias) * sm_scale
+        S = torch.matmul(q, k.transpose(2, 3)) * sm_scale + bias
     if causal:
         S = torch.where(ms + p_seq >= ns, S, float("-inf"))
 
