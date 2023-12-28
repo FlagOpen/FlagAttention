@@ -289,8 +289,13 @@ def _fwd_kernel(
     #                  tl.full((BLOCK_M, BLOCK_M), 0.0, dtype=input_dtype))
     #     q = tl.dot(I, q).to(input_dtype)
 
+    # NOTE: Loop-Bound-For-N
+    # The upper bound of index in n should never exceed the sequence length of k/v. 
+    # `hi = P_SEQ + (start_m + 1) * BLOCK_M` alone does not consider the valid sequence 
+    # length of k/v. It may cause illegal memory access when loading k & v tiles 
+    # if mask_n is not applied for loading.
     if IS_CAUSAL:
-        hi = P_SEQ + (start_m + 1) * BLOCK_M
+        hi = tl.minimum(N_CTX + P_SEQ, P_SEQ + (start_m + 1) * BLOCK_M)
     else:
         hi = N_CTX + P_SEQ
 
@@ -377,7 +382,7 @@ def _bwd_preprocess(
     if DIVISIBLE_M:
         o = tl.load(o_ptrs).to(tl.float32)
         do = tl.load(do_ptrs).to(tl.float32)
-    if not DIVISIBLE_M:
+    else:
         mask_m = off_m < M
         o = tl.load(o_ptrs, mask=mask_m[:, None]).to(tl.float32)
         do = tl.load(do_ptrs, mask=mask_m[:, None]).to(tl.float32)
@@ -612,7 +617,11 @@ def _bwd_q_kernel(
     dq = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
 
     # loop over k, v and update accumulator
-    hi = P_SEQ + (start_m + 1) * BLOCK_M if CAUSAL else N_CTX + P_SEQ
+    # see note "Loop-Bound-For-N"
+    if CAUSAL:
+        hi = tl.minimum(N_CTX + P_SEQ, P_SEQ + (start_m + 1) * BLOCK_M)
+    else:
+        hi = N_CTX + P_SEQ
 
     # loop over a row
     for start_n in range(0, hi, BLOCK_N):

@@ -343,7 +343,12 @@ def _fwd_kernel(
     q2 = tl.dot(q2, I).to(input_dtype)
 
     # loop over k, v and update accumulator
-    hi = P_SEQ + (start_m + 1) * BLOCK_M if IS_CAUSAL else N_CTX + P_SEQ
+    # see note "Loop-Bound-For-N"
+    if IS_CAUSAL:
+        hi = tl.minimum(N_CTX + P_SEQ, P_SEQ + (start_m + 1) * BLOCK_M)
+    else:
+        hi = N_CTX + P_SEQ
+    
     for start_n in range(0, hi, BLOCK_N):
         # -- offsets & masking --
         start_n = tl.multiple_of(start_n, BLOCK_N)
@@ -713,7 +718,11 @@ def _bwd_q_kernel(
     dq2 = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
 
     # loop over k, v and update accumulator
-    hi = P_SEQ + (start_m + 1) * BLOCK_M if CAUSAL else N_CTX + P_SEQ
+    # see note "Loop-Bound-For-N"
+    if CAUSAL:
+        hi = tl.minimum(N_CTX + P_SEQ, P_SEQ + (start_m + 1) * BLOCK_M)
+    else:
+        hi = N_CTX + P_SEQ
 
     # loop over a row
     for start_n in range(0, hi, BLOCK_N):
