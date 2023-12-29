@@ -2,11 +2,19 @@ import math
 import torch
 import triton
 import triton.language as tl
-
+from typing import Optional
 
 class FlashAttention(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q, k, v, causal, sm_scale):
+    def forward(
+        ctx,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+        causal: bool = False,
+        sm_scale: float = None,
+    ) -> torch.Tensor:
         # switch device context
         orginal_device_index = torch.cuda.current_device()
         device_index = q.device.index
@@ -56,7 +64,8 @@ class FlashAttention(torch.autograd.Function):
                         BLOCK_N = 128
                         num_stages = 3
                         num_warps = 8
-        else: # tune for RTX-3090, device_capability(8, 6)
+        # tune for RTX-3090, device_capability(8, 6)
+        elif torch.cuda.get_device_capability(device_index) == (8, 6): 
             if not causal:
                 if Dk <= 64:
                     BLOCK_M = 128 
@@ -79,6 +88,11 @@ class FlashAttention(torch.autograd.Function):
                     BLOCK_N = 32
                     num_stages = 2
                     num_warps = 4
+        else: 
+            BLOCK_M = 32
+            BLOCK_N = 32
+            num_stages = 2
+            num_warps = 4
 
         divisible_m = M % BLOCK_M == 0
         divisible_n = N % BLOCK_N == 0
@@ -90,19 +104,24 @@ class FlashAttention(torch.autograd.Function):
         o = torch.empty_like(q)
         L = torch.empty((B, H, M), device=q.device, dtype=torch.float32)
         _fwd_kernel[grid](
-            q, k, v, sm_scale,
+            # TODO: add bias
+            q, k, v, bias, sm_scale,
             L, o,
             q.stride(0), q.stride(1), q.stride(2), q.stride(3),
             k.stride(0), k.stride(1), k.stride(2), k.stride(3),
             v.stride(0), v.stride(1), v.stride(2), v.stride(3),
             o.stride(0), o.stride(1), o.stride(2), o.stride(3),
+            bias.stride(0) if bias is not None else 0, 
+            bias.stride(1) if bias is not None else 0,
+            bias.stride(2) if bias is not None else 0, 
+            bias.stride(3) if bias is not None else 0,
             B, H, M, P_SEQ,
             BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_DMODEL=D, IS_CAUSAL=causal,
             DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n, 
             num_warps=num_warps, num_stages=num_stages,
         )
 
-        ctx.save_for_backward(q, k, v, o, L)
+        ctx.save_for_backward(q, k, v, bias, o, L)
         ctx.grid = grid
         ctx.sm_scale = sm_scale
         ctx.BLOCK_DMODEL = D
@@ -115,7 +134,7 @@ class FlashAttention(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, do):
-        q, k, v, o, L = ctx.saved_tensors
+        q, k, v, bias, o, L = ctx.saved_tensors
 
         # switching device context
         orginal_device_index = torch.cuda.current_device()
@@ -140,7 +159,8 @@ class FlashAttention(torch.autograd.Function):
                 BLOCK_N = 64
                 num_stages = 3 if D <= 64 else 2
                 num_warps = 4
-        else: # tune for RTX-3090, device_capability(8, 6)
+        # tune for RTX-3090, device_capability(8, 6)
+        elif torch.cuda.get_device_capability(device_index) == (8, 6):
             if not causal:
                 if D <= 64:
                     BLOCK_M = 64
@@ -163,9 +183,16 @@ class FlashAttention(torch.autograd.Function):
                     BLOCK_N = 32
                     num_stages = 2
                     num_warps = 4
+        # suport non-ampere arch (ex. rtx 2060)
+        else: 
+            BLOCK_M = 32
+            BLOCK_N = 32
+            num_stages = 2
+            num_warps = 4
         
         divisible_m = M % BLOCK_M == 0
         divisible_n = N % BLOCK_N == 0
+
 
         delta = torch.empty_like(L)
         grid = (triton.cdiv(M, BLOCK_M), H, B)
@@ -182,55 +209,79 @@ class FlashAttention(torch.autograd.Function):
 
         dk = torch.empty_like(k)
         dv = torch.empty_like(v)
+        dbias = None
+        if bias is not None:
+            dbias = torch.empty_like(bias)
+
         grid = (triton.cdiv(N, BLOCK_N), H, B)
         _bwd_kv_kernel[grid](
-            q, k, v, sm_scale, do, 
-            dk, dv,
+            q, k, v, bias, sm_scale, do, 
+            dk, dv, dbias,
             L, delta,
             q.stride(0), q.stride(1), q.stride(2), q.stride(3),
             k.stride(0), k.stride(1), k.stride(2), k.stride(3),
             v.stride(0), v.stride(1), v.stride(2), v.stride(3),
+            bias.stride(0) if bias is not None else 0, 
+            bias.stride(1) if bias is not None else 0,
+            bias.stride(2) if bias is not None else 0, 
+            bias.stride(3) if bias is not None else 0,
             do.stride(0), do.stride(1), do.stride(2), do.stride(3),
             dk.stride(0), dk.stride(1), dk.stride(2), dk.stride(3),
             dv.stride(0), dv.stride(1), dv.stride(2), dv.stride(3),
+            dbias.stride(0) if bias is not None else 0, 
+            dbias.stride(1) if bias is not None else 0,
+            dbias.stride(2) if bias is not None else 0, 
+            dbias.stride(3) if bias is not None else 0,
             q.shape[0], q.shape[1], q.shape[2], P_SEQ, 
             BLOCK_M=BLOCK_M, BLOCK_DMODEL=D, BLOCK_N=BLOCK_N, CAUSAL=causal,
             DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
             num_stages=num_stages, num_warps=num_warps,
         )
 
-        dq = torch.zeros_like(q) # us float32 for atomic updates
+        dq = torch.zeros_like(q) # use float32 for atomic updates
         grid = (triton.cdiv(M, BLOCK_M), H, B)
         _bwd_q_kernel[grid](
-            q, k, v, sm_scale, do, 
+            q, k, v, bias, sm_scale, do,
             dq,
             L, delta,
             q.stride(0), q.stride(1), q.stride(2), q.stride(3),
             k.stride(0), k.stride(1), k.stride(2), k.stride(3),
             v.stride(0), v.stride(1), v.stride(2), v.stride(3),
+            bias.stride(0) if bias is not None else 0, 
+            bias.stride(1) if bias is not None else 0,
+            bias.stride(2) if bias is not None else 0, 
+            bias.stride(3) if bias is not None else 0,
             do.stride(0), do.stride(1), do.stride(2), do.stride(3),
             dq.stride(0), dq.stride(1), dq.stride(2), dq.stride(3),
-            q.shape[0], q.shape[1], q.shape[2], P_SEQ, 
+            q.shape[0], q.shape[1], q.shape[2], P_SEQ,
             BLOCK_M=BLOCK_M, BLOCK_DMODEL=D, BLOCK_N=BLOCK_N, CAUSAL=causal,
             DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
             num_stages=num_stages, num_warps = num_warps,
         )
 
         torch.cuda.set_device(orginal_device_index)
-        return dq, dk, dv, None, None, None
+        return dq, dk, dv, dbias, None, None, None
 
-def attention(q, k, v, causal=False, sm_scale=None):
-    return FlashAttention.apply(q, k, v, causal, sm_scale)
+def attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
+    causal: bool = False,
+    sm_scale: float = None,
+):
+    return FlashAttention.apply(q, k, v, bias, causal, sm_scale)
 
 
 @triton.jit
 def _fwd_kernel(
-    Q, K, V, sm_scale,
+    Q, K, V, BIAS, sm_scale,
     L, O,
     stride_qz, stride_qh, stride_qm, stride_qk,
     stride_kz, stride_kh, stride_kn, stride_kk,
     stride_vz, stride_vh, stride_vn, stride_vk,
     stride_oz, stride_oh, stride_om, stride_ok,
+    stride_bz, stride_bh, stride_bm, stride_bn,
     Z, H, N_CTX, P_SEQ,
     BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr, 
     IS_CAUSAL: tl.constexpr,
@@ -246,12 +297,13 @@ def _fwd_kernel(
     # 2^x instead of exp in the loop because CSE and LICM
     # don't work as expected with `exp` in the loop
     log2e: tl.constexpr = 1.4426950408889634
-    qk_scale = sm_scale * log2e
 
     # offset pointers for (batch, head)
     Q += off_z * stride_qz + off_h * stride_qh
     K += off_z * stride_kz + off_h * stride_kh
     V += off_z * stride_vz + off_h * stride_vh
+    if BIAS is not None:
+        BIAS += off_z * stride_bz + off_h * stride_bh 
     O += off_z * stride_oz + off_h * stride_oh
     L += (off_z * H + off_h) * N_CTX # l's shape is (B, H, N_CTX)
 
@@ -277,7 +329,7 @@ def _fwd_kernel(
         mask_m = offs_m < N_CTX
         q = tl.load(q_ptrs, mask=mask_m[:, None], cache_modifier=".cg")
     
-    #Dot I trick: to place q in registers, it saves shared memory
+    # Dot I trick: to place q in registers, it saves shared memory
     if BLOCK_DMODEL < 128:
         I = tl.where(offs_k[:, None] == offs_k,
                      tl.full((BLOCK_DMODEL, BLOCK_DMODEL), 1.0, dtype=input_dtype),
@@ -307,6 +359,9 @@ def _fwd_kernel(
     offs_n_init = offs_n_base
     k_ptrs = K + (offs_k[:, None] * stride_vk + offs_n_init[None, :] * stride_vn) # (BLOCK_DMODEL, BLOCK_N)
     v_ptrs = V + (offs_n_init[:, None] * stride_kn + offs_k[None, :] * stride_kk) # (BLOCK_N, BLOCK_DMODEL)
+    if BIAS is not None:
+        bias_ptrs = BIAS + (offs_m[:, None] * stride_bm + offs_n_init[None, :] * stride_bn) # (BLOCK_M, BLOCK_N)
+
     for start_n in range(0, hi, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         offs_n = start_n + offs_n_base
@@ -322,7 +377,19 @@ def _fwd_kernel(
 
         # -- compute qk ---
         s = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-        s += tl.dot(q, k)
+        s += tl.dot(q, k) * sm_scale
+
+        if BIAS is not None: 
+            if DIVISIBLE_M and DIVISIBLE_N:
+                bias = tl.load(bias_ptrs)
+            elif DIVISIBLE_M and not DIVISIBLE_N:
+                bias = tl.load(bias_ptrs, mask=mask_n[None, :])
+            elif not DIVISIBLE_M and DIVISIBLE_N:
+                bias = tl.load(bias_ptrs, mask=mask_m[:, None])
+            else:
+                bias = tl.load(bias_ptrs, mask=mask_m[:, None] & mask_n[None, :])
+            s += bias
+            
         
         if not DIVISIBLE_N:
             s = tl.where(mask_n[None, :], s, float("-inf"))
@@ -332,8 +399,8 @@ def _fwd_kernel(
 
         # -- compute scaling constant ---
         m_i_new = tl.maximum(m_i, tl.max(s, 1))
-        alpha = tl.math.exp2((m_i - m_i_new) * qk_scale)
-        p = tl.math.exp2(s * qk_scale - m_i_new[:, None] * qk_scale)
+        alpha = tl.math.exp2((m_i - m_i_new) * log2e)
+        p = tl.math.exp2((s - m_i_new[:, None]) * log2e)
 
         # -- scale and update acc: acc *= alpha[:, None]--
         acc *= alpha[:, None]
@@ -345,10 +412,12 @@ def _fwd_kernel(
         # update pointers
         k_ptrs += BLOCK_N * stride_kn
         v_ptrs += BLOCK_N * stride_vn
+        if BIAS is not None:
+            bias_ptrs += BLOCK_N * stride_bn
 
     # write back l & o
     acc = acc * (1.0 / l_i[:, None])
-    l = m_i * sm_scale + tl.log(l_i) # log(normalizer)
+    l = m_i + tl.log(l_i) # log(normalizer)
     if DIVISIBLE_M:
         tl.store(l_ptrs, l, cache_modifier=".cg")
         tl.store(o_ptrs, acc.to(input_dtype), cache_modifier=".cg")
@@ -403,16 +472,18 @@ def _bwd_preprocess(
 
 @triton.jit
 def _bwd_kv_kernel(
-    Q, K, V, sm_scale, DO,
-    DK, DV,
+    Q, K, V, BIAS, sm_scale, DO,
+    DK, DV, DBIAS,
     L,
     D,
     stride_qz, stride_qh, stride_qm, stride_qk,
     stride_kz, stride_kh, stride_kn, stride_kk,
     stride_vz, stride_vh, stride_vn, stride_vk,
+    stride_bz, stride_bh, stride_bm, stride_bn,
     stride_doz, stride_doh, stride_dom, stride_dok,
     stride_dkz, stride_dkh, stride_dkn, stride_dkk,
     stride_dvz, stride_dvh, stride_dvn, stride_dvk,
+    stride_dbz, stride_dbh, stride_dbm, stride_dbn,
     Z, H, N_CTX, P_SEQ, 
     BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr,
     CAUSAL: tl.constexpr,
@@ -424,7 +495,6 @@ def _bwd_kv_kernel(
     off_h = tl.program_id(1)
     off_z = tl.program_id(2)
     log2e: tl.constexpr = 1.4426950408889634
-    qk_scale = sm_scale * log2e
 
     # offset pointers for (batch, head)
     Q += off_z * stride_qz + off_h * stride_qh
@@ -435,6 +505,10 @@ def _bwd_kv_kernel(
     # offset pointers for batch/head
     DK += off_z * stride_dkz + off_h * stride_dkh
     DV += off_z * stride_dvz + off_h * stride_dvh
+
+    if BIAS is not None:
+        BIAS += off_z * stride_bz + off_h * stride_bh
+        DBIAS += off_z * stride_dbz + off_h * stride_dbh
 
     # offset pointers for batch/head
     D += (off_z * H + off_h) * N_CTX
@@ -459,6 +533,10 @@ def _bwd_kv_kernel(
 
     dv_ptrs = DV + (offs_n[:, None] * stride_dvn + offs_k[None, :] * stride_dvk) # (BLOCK_N, BLOCK_DMODEL)
     dk_ptrs = DK + (offs_n[:, None] * stride_dkn + offs_k[None, :] * stride_dkk) # (BLOCK_N, BLOCK_DMODEL)
+
+    if BIAS is not None:
+        bias_ptrs = BIAS + (offs_m_init[:, None] * stride_bm + offs_n[None, :] * stride_bn) # (BLOCK_M, BLOCK_N)
+        dbias_ptrs = DBIAS + (offs_m_init[:, None] * stride_dbm + offs_n[None, :] * stride_dbn) # (BLOCK_M, BLOCK_N)
 
     # k and v stay in SRAM throughout
     if DIVISIBLE_N:
@@ -488,7 +566,18 @@ def _bwd_kv_kernel(
             q = tl.load(q_ptrs, mask=mask_m[:, None])
         # recompute p = softmax(qk * sm_scale, dim=-1)
         s = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-        s += tl.dot(q, tl.trans(k))
+        s += tl.dot(q, tl.trans(k)) * sm_scale
+
+        if BIAS is not None: 
+            if DIVISIBLE_M and DIVISIBLE_N:
+                bias = tl.load(bias_ptrs)
+            elif DIVISIBLE_M and not DIVISIBLE_N:
+                bias = tl.load(bias_ptrs, mask=mask_n[None, :])
+            elif not DIVISIBLE_M and DIVISIBLE_N:
+                bias = tl.load(bias_ptrs, mask=mask_m[:, None])
+            else:
+                bias = tl.load(bias_ptrs, mask=mask_m[:, None] & mask_n[None, :])
+            s += bias
 
         # NOTE: since softmax in backward is pointwise, the normalizer has been saved in fwd)
         # So masking on s is not needed.
@@ -501,7 +590,7 @@ def _bwd_kv_kernel(
             l = tl.load(L + offs_m)
         else:
             l = tl.load(L + offs_m, mask=mask_m)
-        p = tl.math.exp2(s * qk_scale - l[:, None] * log2e) # (BLOCK_M, BLOCK_N)
+        p = tl.math.exp2((s - l[:, None]) * log2e) # (BLOCK_M, BLOCK_N)
 
         if not DIVISIBLE_M:
             p = tl.where(valid_mask, p, 0.0)
@@ -535,9 +624,24 @@ def _bwd_kv_kernel(
         # compute dk = dot(ds.T, q) masking
         dk += tl.dot(tl.trans(ds), q)
 
+        if BIAS is not None: 
+            if DIVISIBLE_M and DIVISIBLE_N:
+                tl.store(dbias_ptrs, ds) # (BLOCK_M, BLOCK_N)
+            elif DIVISIBLE_M and not DIVISIBLE_N:
+                tl.store(dbias_ptrs, ds, mask=mask_n[None, :]) # (BLOCK_M, BLOCK_N)
+                bias = tl.load(bias_ptrs, mask=mask_n[None, :])
+            elif not DIVISIBLE_M and DIVISIBLE_N:
+                tl.store(dbias_ptrs, ds, mask=mask_m[:, None]) # (BLOCK_M, BLOCK_N)
+            else:
+                tl.store(dbias_ptrs, ds, mask=mask_m[:, None] & mask_n[None, :]) # (BLOCK_M, BLOCK_N)
+
         # increment pointers
         q_ptrs += BLOCK_M * stride_qm
         do_ptrs += BLOCK_M * stride_dom
+
+        if BIAS is not None: 
+            bias_ptrs += BLOCK_M * stride_bm
+            dbias_ptrs += BLOCK_M * stride_dbm
 
     dk *= sm_scale
     if DIVISIBLE_N:
@@ -550,13 +654,14 @@ def _bwd_kv_kernel(
 
 @triton.jit
 def _bwd_q_kernel(
-    Q, K, V, sm_scale, DO,
+    Q, K, V, BIAS, sm_scale, DO,
     DQ,
     L,
     D,
     stride_qz, stride_qh, stride_qm, stride_qk,
     stride_kz, stride_kh, stride_kn, stride_kk,
     stride_vz, stride_vh, stride_vn, stride_vk,
+    stride_bz, stride_bh, stride_bm, stride_bn,
     stride_doz, stride_doh, stride_dom, stride_dok,
     stride_dqz, stride_dqh, stride_dqm, stride_dqk,
     Z, H, N_CTX, P_SEQ, 
@@ -574,7 +679,6 @@ def _bwd_q_kernel(
     # 2^x instead of exp in the loop because CSE and LICM
     # don't work as expected with `exp` in the loop
     log2e: tl.constexpr = 1.4426950408889634
-    qk_scale = sm_scale * log2e
 
     # offset pointers for (batch, head)
     Q += off_z * stride_qz + off_h * stride_qh
@@ -583,6 +687,9 @@ def _bwd_q_kernel(
     DO += off_z * stride_doz + off_h * stride_doh
     D += (off_z * H + off_h) * N_CTX
     L += (off_z * H + off_h) * N_CTX
+
+    if BIAS is not None:
+        BIAS += off_z * stride_bz + off_h * stride_bh
 
     # offset pointers for batch/head
     DQ += off_z * stride_dqz + off_h * stride_dqh
@@ -599,6 +706,9 @@ def _bwd_q_kernel(
 
     dq_ptrs = DQ + (offs_m[:, None] * stride_dqm + offs_k[None, :] * stride_dqk) # (BLOCK_M, BLOCK_DMODEL)
     do_ptrs = DO + (offs_m[:, None] * stride_dom + offs_k[None, :] * stride_dok) # (BLOCK_M, BLOCK_DMODEL)
+
+    if BIAS is not None:
+        bias_ptrs = BIAS + (offs_m[:, None] * stride_bm + offs_n_init[None, :] * stride_bn)
 
     # pointer to row-wise quantities in value-like data
     d_ptrs = D + offs_m
@@ -647,7 +757,18 @@ def _bwd_q_kernel(
         if CAUSAL:
             causal_mask = (P_SEQ + offs_m[:, None]) >= (offs_n[None, :]) # (BLOCK_M, BLOCK_N)
         s = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-        s += tl.dot(q, tl.trans(k))
+        s += tl.dot(q, tl.trans(k)) * sm_scale
+
+        if BIAS is not None: 
+            if DIVISIBLE_M and DIVISIBLE_N:
+                bias = tl.load(bias_ptrs)
+            elif DIVISIBLE_M and not DIVISIBLE_N:
+                bias = tl.load(bias_ptrs, mask=mask_n[None, :])
+            elif not DIVISIBLE_M and DIVISIBLE_N:
+                bias = tl.load(bias_ptrs, mask=mask_m[:, None])
+            else:
+                bias = tl.load(bias_ptrs, mask=mask_m[:, None] & mask_n[None, :])
+            s += bias
 
         # NOTE: since softmax in backward is pointwise, the normalizer has been saved in fwd)
         # So masking on s is not needed.
@@ -655,7 +776,7 @@ def _bwd_q_kernel(
         #     s = tl.where(causal_mask & valid_mask, s, float("-inf"))
         # else:
         #     s = tl.where(valid_mask, s, float("-inf"))
-        p = tl.math.exp2(s * qk_scale - l[:, None] * log2e) # (BLOCK_M, BLOCK_N)
+        p = tl.math.exp2((s - l[:, None]) * log2e) # (BLOCK_M, BLOCK_N)
 
         # compute dp = dot(v, do)
         dp = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
@@ -681,6 +802,8 @@ def _bwd_q_kernel(
         # increment pointers
         k_ptrs += BLOCK_N * stride_kn
         v_ptrs += BLOCK_N * stride_vn
+        if BIAS is not None:
+            bias_ptrs += BLOCK_N * stride_bn
     
     dq *= sm_scale
     if DIVISIBLE_M:

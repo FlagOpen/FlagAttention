@@ -4,8 +4,9 @@ import torch
 import math
 import torch
 import pytest
+from typing import Optional
 
-def attention(q, k, v, causal, sm_scale=None, upcast=False):
+def attention(q, k, v, bias: Optional[torch.Tensor] = None, causal: bool = False, sm_scale: float = None, upcast: bool = False):
     input_dtype = q.dtype
     if upcast:
         q, k, v = q.float(), k.float(), v.float()
@@ -21,7 +22,10 @@ def attention(q, k, v, causal, sm_scale=None, upcast=False):
     ms = torch.arange(q_seq_len, device=device).unsqueeze(-1)
     ns = torch.arange(kv_seq_len, device=device)
     
-    S = torch.matmul(q, k.transpose(2, 3)) * sm_scale
+    if bias is None: 
+        S = torch.matmul(q, k.transpose(2, 3)) * sm_scale
+    else: 
+        S = torch.matmul(q, k.transpose(2, 3)) * sm_scale + bias
     if causal:
         S = torch.where(ms + p_seq >= ns, S, float("-inf"))
 
