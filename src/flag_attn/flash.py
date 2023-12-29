@@ -290,10 +290,14 @@ def _fwd_kernel(
     #     q = tl.dot(I, q).to(input_dtype)
 
     # NOTE: Loop-Bound-For-N
-    # The upper bound of index in n should never exceed the sequence length of k/v. 
-    # `hi = P_SEQ + (start_m + 1) * BLOCK_M` alone does not consider the valid sequence 
-    # length of k/v. It may cause illegal memory access when loading k & v tiles 
-    # if mask_n is not applied for loading.
+    # The indices in m-dimension that this block may access is in `[start_m * BLOCK_M, (start_m + 1) * BLOCK_M)`.
+    # According to the rule of causal masking, then max index in n-dimension that this block may access
+    # is `P_SEQ + (start_m + 1) * BLOCK_M`. 
+    # However, the upper bound of index in n-dimension should never exceed the sequence length of k/v(`P_SEQ + N_CTX`). 
+    # `P_SEQ + (start_m + 1) * BLOCK_M` may be larger than `P_SEQ + N_CTX`.
+    # At this case, there would be illegal memory access when loading k & v tiles 
+    # if mask_n is not applied for loading(only when `DIVISIBLE_N`` is true).
+    # See also https://github.com/FlagOpen/FlagAttention/pull/8
     if IS_CAUSAL:
         hi = tl.minimum(N_CTX + P_SEQ, P_SEQ + (start_m + 1) * BLOCK_M)
     else:
