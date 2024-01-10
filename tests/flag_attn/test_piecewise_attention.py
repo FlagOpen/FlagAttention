@@ -63,7 +63,7 @@ def test_attention_fwd(B, H, T, D, P_SEQ, causal, stride_order, dtype, scale, de
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('stride_order', ['BHTD', 'BTHD'])
 @pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
-def test_attention_fwd_bwd(B, H, T, D, P_SEQ, causal, stride_order, dtype, scale, device_id):
+def test_attention_bwd(B, H, T, D, P_SEQ, causal, stride_order, dtype, scale, device_id):
     device = f"cuda:{device_id}"
     if stride_order == "BHTD":
         q1 = torch.empty((B, H, T, D), dtype=dtype, device=device).normal_(mean=0., std=scale).requires_grad_()

@@ -3,15 +3,12 @@ import torch
 import triton
 import triton.language as tl
 
+__all__ = ["attention"]
 
+# --------------------------- public API ---------------------------
 class FlashAttention(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, causal, sm_scale):
-        # switch device context
-        orginal_device_index = torch.cuda.current_device()
-        device_index = q.device.index
-        torch.cuda.set_device(device_index)
-
         Dq, Dk, Dv = q.shape[-1], k.shape[-1], v.shape[-1]
         assert Dq == Dk == Dv
         assert Dk in {16, 32, 64, 128}
@@ -19,208 +16,166 @@ class FlashAttention(torch.autograd.Function):
         B, H, M, D = q.shape
         N = k.shape[2]
         P_SEQ = N - M
-        
-        # tune for A100, device_capability(8, 0)
-        if torch.cuda.get_device_capability(device_index) == (8, 0): 
-            if not causal:
-                if Dk <= 64:
-                    BLOCK_M = 128 
-                    BLOCK_N = 64
-                    num_stages = 3
-                    num_warps = 4
-                else:
-                    if M <= 1024:
-                        BLOCK_M = 128
-                        BLOCK_N = 32
-                        num_stages = 3
-                        num_warps = 4
-                    else:
-                        BLOCK_M = 128 
-                        BLOCK_N = 128
-                        num_stages = 3
-                        num_warps = 8
-            else:
-                if Dk <= 64:
-                    BLOCK_M = 128 
-                    BLOCK_N = 64
-                    num_stages = 4
-                    num_warps = 4
-                else:
-                    if M <= 1024:
-                        BLOCK_M = 128
-                        BLOCK_N = 32
-                        num_stages = 2
-                        num_warps = 4
-                    else:
-                        BLOCK_M = 128 
-                        BLOCK_N = 128
-                        num_stages = 3
-                        num_warps = 8
-        else: # tune for RTX-3090, device_capability(8, 6)
-            if not causal:
-                if Dk <= 64:
-                    BLOCK_M = 128 
-                    BLOCK_N = 64
-                    num_stages = 3
-                    num_warps = 4
-                else:
-                    BLOCK_M = 128
-                    BLOCK_N = 32
-                    num_stages = 2
-                    num_warps = 4
-            else: # causal
-                if Dk <= 64:
-                    BLOCK_M = 64
-                    BLOCK_N = 64
-                    num_stages = 3
-                    num_warps = 4
-                else:
-                    BLOCK_M = 128
-                    BLOCK_N = 32
-                    num_stages = 2
-                    num_warps = 4
 
-        divisible_m = M % BLOCK_M == 0
-        divisible_n = N % BLOCK_N == 0
         if sm_scale is None:
             sm_scale = 1. / math.sqrt(D)
+        
+        # to work around https://github.com/openai/triton/issues/2441
+        device = torch.cuda.device_of(q)
+        with torch.cuda.device(device):
+            config = get_fwd_config(B, H, M, N, D, causal)
+            BLOCK_M, BLOCK_N, num_stages, num_warps = config
 
-        # consider using 3d grid to avoid div & rem
-        grid = (triton.cdiv(M, BLOCK_M), H, B)
-        o = torch.empty_like(q)
-        L = torch.empty((B, H, M), device=q.device, dtype=torch.float32)
-        _fwd_kernel[grid](
-            q, k, v, sm_scale,
-            L, o,
-            q.stride(0), q.stride(1), q.stride(2), q.stride(3),
-            k.stride(0), k.stride(1), k.stride(2), k.stride(3),
-            v.stride(0), v.stride(1), v.stride(2), v.stride(3),
-            o.stride(0), o.stride(1), o.stride(2), o.stride(3),
-            B, H, M, P_SEQ,
-            BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_DMODEL=D, IS_CAUSAL=causal,
-            DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n, 
-            num_warps=num_warps, num_stages=num_stages,
-        )
+            divisible_m = M % BLOCK_M == 0
+            divisible_n = N % BLOCK_N == 0
+            # consider using 3d grid to avoid div & rem
+            grid = (triton.cdiv(M, BLOCK_M), H, B)
+            o = torch.empty_like(q)
+            L = torch.empty((B, H, M), device=q.device, dtype=torch.float32)
+            _fwd_kernel[grid](
+                q, k, v, sm_scale,
+                L, o,
+                q.stride(0), q.stride(1), q.stride(2), q.stride(3),
+                k.stride(0), k.stride(1), k.stride(2), k.stride(3),
+                v.stride(0), v.stride(1), v.stride(2), v.stride(3),
+                o.stride(0), o.stride(1), o.stride(2), o.stride(3),
+                B, H, M, P_SEQ,
+                BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_DMODEL=D, IS_CAUSAL=causal,
+                DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n, 
+                num_warps=num_warps, num_stages=num_stages,
+            )
 
+        # autograd context maintenance
         ctx.save_for_backward(q, k, v, o, L)
-        ctx.grid = grid
         ctx.sm_scale = sm_scale
-        ctx.BLOCK_DMODEL = D
-        ctx.P_SEQ = P_SEQ
         ctx.causal = causal
-
-        # restore device context
-        torch.cuda.set_device(orginal_device_index)
         return o
 
     @staticmethod
     def backward(ctx, do):
         q, k, v, o, L = ctx.saved_tensors
-
-        # switching device context
-        orginal_device_index = torch.cuda.current_device()
-        device_index = q.device.index
-        torch.cuda.set_device(device_index)
+        sm_scale = ctx.sm_scale
+        causal = ctx.causal
 
         B, H, M, D = q.shape
         N = k.shape[2]
         P_SEQ = N - M
-        sm_scale = ctx.sm_scale
-        causal = ctx.causal
 
-        # tune for A100, device_capability(8, 0)
-        if torch.cuda.get_device_capability(device_index) == (8, 0):
-            if not causal:
-                BLOCK_M = 128 if D <= 64 else 64
-                BLOCK_N = 64
-                num_stages = 2
-                num_warps = 4
-            else:
-                BLOCK_M = 64
-                BLOCK_N = 64
-                num_stages = 3 if D <= 64 else 2
-                num_warps = 4
-        else: # tune for RTX-3090, device_capability(8, 6)
-            if not causal:
-                if D <= 64:
-                    BLOCK_M = 64
-                    BLOCK_N = 64
-                    num_stages = 2
-                    num_warps = 4
-                else:
-                    BLOCK_M = 64
-                    BLOCK_N = 64
-                    num_stages = 2
-                    num_warps = 8
-            else:
-                if D <= 64:
-                    BLOCK_M = 64
-                    BLOCK_N = 64
-                    num_stages = 2
-                    num_warps = 4
-                else:
-                    BLOCK_M = 32
-                    BLOCK_N = 32
-                    num_stages = 2
-                    num_warps = 4
+        if sm_scale is None:
+            sm_scale = 1. / math.sqrt(D)
         
-        divisible_m = M % BLOCK_M == 0
-        divisible_n = N % BLOCK_N == 0
+        # to work around https://github.com/openai/triton/issues/2441
+        device = torch.cuda.device_of(q)
+        with torch.cuda.device(device):
+            config = get_fwd_config(B, H, M, N, D, causal)
+            BLOCK_M, BLOCK_N, num_stages, num_warps = config
 
-        delta = torch.empty_like(L)
-        grid = (triton.cdiv(M, BLOCK_M), H, B)
-        _bwd_preprocess[grid](
-            o, do,
-            delta,
-            o.stride(0), o.stride(1), o.stride(2), o.stride(3),
-            do.stride(0), do.stride(1), do.stride(2), do.stride(3),
-            delta.stride(0), delta.stride(1), delta.stride(2),
-            M,
-            BLOCK_M=BLOCK_M, D_HEAD=D,
-            DIVISIBLE_M=divisible_m,
-        )
+            divisible_m = M % BLOCK_M == 0
+            divisible_n = N % BLOCK_N == 0
 
-        dk = torch.empty_like(k)
-        dv = torch.empty_like(v)
-        grid = (triton.cdiv(N, BLOCK_N), H, B)
-        _bwd_kv_kernel[grid](
-            q, k, v, sm_scale, do, 
-            dk, dv,
-            L, delta,
-            q.stride(0), q.stride(1), q.stride(2), q.stride(3),
-            k.stride(0), k.stride(1), k.stride(2), k.stride(3),
-            v.stride(0), v.stride(1), v.stride(2), v.stride(3),
-            do.stride(0), do.stride(1), do.stride(2), do.stride(3),
-            dk.stride(0), dk.stride(1), dk.stride(2), dk.stride(3),
-            dv.stride(0), dv.stride(1), dv.stride(2), dv.stride(3),
-            q.shape[0], q.shape[1], q.shape[2], P_SEQ, 
-            BLOCK_M=BLOCK_M, BLOCK_DMODEL=D, BLOCK_N=BLOCK_N, CAUSAL=causal,
-            DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
-            num_stages=num_stages, num_warps=num_warps,
-        )
+            delta = torch.empty_like(L)
+            grid = (triton.cdiv(M, BLOCK_M), H, B)
+            _bwd_preprocess[grid](
+                o, do,
+                delta,
+                o.stride(0), o.stride(1), o.stride(2), o.stride(3),
+                do.stride(0), do.stride(1), do.stride(2), do.stride(3),
+                delta.stride(0), delta.stride(1), delta.stride(2),
+                M,
+                BLOCK_M=BLOCK_M, D_HEAD=D,
+                DIVISIBLE_M=divisible_m,
+            )
 
-        dq = torch.zeros_like(q) # us float32 for atomic updates
-        grid = (triton.cdiv(M, BLOCK_M), H, B)
-        _bwd_q_kernel[grid](
-            q, k, v, sm_scale, do, 
-            dq,
-            L, delta,
-            q.stride(0), q.stride(1), q.stride(2), q.stride(3),
-            k.stride(0), k.stride(1), k.stride(2), k.stride(3),
-            v.stride(0), v.stride(1), v.stride(2), v.stride(3),
-            do.stride(0), do.stride(1), do.stride(2), do.stride(3),
-            dq.stride(0), dq.stride(1), dq.stride(2), dq.stride(3),
-            q.shape[0], q.shape[1], q.shape[2], P_SEQ, 
-            BLOCK_M=BLOCK_M, BLOCK_DMODEL=D, BLOCK_N=BLOCK_N, CAUSAL=causal,
-            DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
-            num_stages=num_stages, num_warps = num_warps,
-        )
+            dk = torch.empty_like(k)
+            dv = torch.empty_like(v)
+            grid = (triton.cdiv(N, BLOCK_N), H, B)
+            _bwd_kv_kernel[grid](
+                q, k, v, sm_scale, do, 
+                dk, dv,
+                L, delta,
+                q.stride(0), q.stride(1), q.stride(2), q.stride(3),
+                k.stride(0), k.stride(1), k.stride(2), k.stride(3),
+                v.stride(0), v.stride(1), v.stride(2), v.stride(3),
+                do.stride(0), do.stride(1), do.stride(2), do.stride(3),
+                dk.stride(0), dk.stride(1), dk.stride(2), dk.stride(3),
+                dv.stride(0), dv.stride(1), dv.stride(2), dv.stride(3),
+                q.shape[0], q.shape[1], q.shape[2], P_SEQ, 
+                BLOCK_M=BLOCK_M, BLOCK_DMODEL=D, BLOCK_N=BLOCK_N, CAUSAL=causal,
+                DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
+                num_stages=num_stages, num_warps=num_warps,
+            )
 
-        torch.cuda.set_device(orginal_device_index)
+            dq = torch.zeros_like(q)
+            grid = (triton.cdiv(M, BLOCK_M), H, B)
+            _bwd_q_kernel[grid](
+                q, k, v, sm_scale, do, 
+                dq,
+                L, delta,
+                q.stride(0), q.stride(1), q.stride(2), q.stride(3),
+                k.stride(0), k.stride(1), k.stride(2), k.stride(3),
+                v.stride(0), v.stride(1), v.stride(2), v.stride(3),
+                do.stride(0), do.stride(1), do.stride(2), do.stride(3),
+                dq.stride(0), dq.stride(1), dq.stride(2), dq.stride(3),
+                q.shape[0], q.shape[1], q.shape[2], P_SEQ, 
+                BLOCK_M=BLOCK_M, BLOCK_DMODEL=D, BLOCK_N=BLOCK_N, CAUSAL=causal,
+                DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
+                num_stages=num_stages, num_warps = num_warps,
+            )
+
         return dq, dk, dv, None, None, None
 
+
 def attention(q, k, v, causal=False, sm_scale=None):
+    """
+    An implementation of FlashAttention v2(https://arxiv.org/abs/2307.08691).
+
+    Arguments:
+        q(torch.Tensor): The first queries. The shape is (batch_size, nheads, seqlen_q, headdim).
+        k(torch.Tensor): The first keys. The shape is (batch_size, nheads, seqlen_k, headdim).
+        v(torch.Tensor): The values. The shape is (batch_size, nheads, seqlen_k, headdim).
+        causal(bool): Whether causal masking is applied to attention scores before applying softmax.
+        sm_scale(float): The scaling of attention scores before applying softmax.
+
+    Returns:
+        out: (torch.Tensor): The output. The shape is (batch_size, nheads, seqlen_q, headdim).
+    """
     return FlashAttention.apply(q, k, v, causal, sm_scale)
+
+
+# --------------------------- Forward ---------------------------
+# NOTE: this function can be overwritten at runtime to use your custom config
+def get_fwd_config(B, H, M, N, D, causal):
+    if torch.cuda.get_device_capability() == (8, 0): 
+        if not causal:
+            if D <= 64:
+                BLOCK_M, BLOCK_N, num_stages, num_warps = 128, 64, 3, 4
+            else:
+                if M <= 1024:
+                    BLOCK_M, BLOCK_N, num_stages, num_warps = 128, 32, 3, 4
+                else:
+                    BLOCK_M, BLOCK_N, num_stages, num_warps = 128, 128, 3, 8
+        else:
+            if D <= 64:
+                BLOCK_M, BLOCK_N, num_stages, num_warps = 128, 64, 4, 4
+            else:
+                if M <= 1024:
+                    BLOCK_M, BLOCK_N, num_stages, num_warps = 128, 32, 2, 4
+                else:
+                    BLOCK_M, BLOCK_N, num_stages, num_warps = 128, 128, 3, 8
+    elif torch.cuda.get_device_capability() == (8, 6):
+        if not causal:
+            if D <= 64:
+                BLOCK_M, BLOCK_N, num_stages, num_warps = 128, 64, 3, 4
+            else:
+                BLOCK_M, BLOCK_N, num_stages, num_warps = 128, 32, 2, 4
+        else: # causal
+            if D <= 64:
+                BLOCK_M, BLOCK_N, num_stages, num_warps = 64, 64, 3, 4
+            else:
+                BLOCK_M, BLOCK_N, num_stages, num_warps = 128, 32, 2, 4
+    else:
+        BLOCK_M, BLOCK_N, num_stages, num_warps = 32, 32, 1, 4
+    return (BLOCK_M, BLOCK_N, num_stages, num_warps)
 
 
 @triton.jit
@@ -356,6 +311,35 @@ def _fwd_kernel(
         tl.store(l_ptrs, l, mask=mask_m, cache_modifier=".cg")
         tl.store(o_ptrs, acc.to(input_dtype), mask=mask_m[:, None], cache_modifier=".cg")
 
+
+# --------------------------- Backward ---------------------------
+# NOTE: this function can be overwritten at runtime to use your custom config
+def get_bwd_config(B, H, M, N, D, causal):
+    if torch.cuda.get_device_capability() == (8, 0):
+        if not causal:
+            BLOCK_M = 128 if D <= 64 else 64
+            BLOCK_N = 64
+            num_stages = 2
+            num_warps = 4
+        else:
+            BLOCK_M = 64
+            BLOCK_N = 64
+            num_stages = 3 if D <= 64 else 2
+            num_warps = 4
+    elif torch.cuda.get_device_capability() == (8, 6): # tune for RTX-3090, device_capability(8, 6)
+        if not causal:
+            if D <= 64:
+                BLOCK_M, BLOCK_N, num_stages, num_warps = 64, 64, 2, 4
+            else:
+                BLOCK_M, BLOCK_N, num_stages, num_warps = 64, 64, 2, 8
+        else:
+            if D <= 64:
+                BLOCK_M, BLOCK_N, num_stages, num_warps = 64, 64, 2, 4
+            else:
+                BLOCK_M, BLOCK_N, num_stages, num_warps = 32, 32, 2, 4
+    else:
+        BLOCK_M, BLOCK_N, num_stages, num_warps = 32, 32, 1, 4
+    return (BLOCK_M, BLOCK_N, num_stages, num_warps)
 
 
 @triton.jit

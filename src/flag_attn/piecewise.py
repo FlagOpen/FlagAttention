@@ -21,31 +21,49 @@ import triton.language as tl
 
 __all__ = ["attention"]
 
+# --------------------------- public API ---------------------------
 class PiecewiseAttention(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q1, k1, q2, k2, v, w, causal, sm_scale):
-        """
-        PiecewiseAttention
+        # shape constraints
+        Dq1, Dk1, Dq2, Dk2, Dv = q1.shape[-1], k1.shape[-1], q2.shape[-1], k2.shape[-1], v.shape[-1]
+        assert Dq1 == Dk1 == Dq2 == Dk2 == Dv
+        assert Dk1 in {16, 32, 64, 128}
 
-        Piecewise deviates from standard scaled dot product attention in that takes 
-        as inputs two q's and two k's as inputs. The attention score is dot product 
-        of (q1, k1) or (q2, k2) depending on whether the distance between q & k 
-        exceeds a threshold.
+        B, H, M, D = q1.shape
+        N = k1.shape[2]
+        if sm_scale is None:
+            sm_scale = 1. / math.sqrt(D)
+        
+        # to work around https://github.com/openai/triton/issues/2441
+        device = torch.cuda.device_of(q1)
+        with torch.cuda.device(device):
+            config = get_fwd_config(B, H, M, N, D, causal)
+            BLOCK_M, BLOCK_N, num_stages, num_warps = config
 
-        Arguments:
-            q1(torch.Tensor): The first queries. The shape is (batch_size, nheads, seqlen_q, headdim).
-            k1(torch.Tensor): The first keys. The shape is (batch_size, nheads, seqlen_k, headdim).
-            q2(torch.Tensor): The second queries. The shape is (batch_size, nheads, seqlen_q, headdim).
-            k2(torch.Tensor): The second keys. The shape is (batch_size, nheads, seqlen_k, headdim).
-            v(torch.Tensor): The values. The shape is (batch_size, nheads, seqlen_k, headdim).
-            w(int): The threshold of distance between q and k. When the distance is not greater than w, the attention score is dot(q1, k1); otherwise dot(q2, k2).
-            causal(bool): Whether causal masking is applied to attention scores before applying softmax.
-            sm_scale(float): The scaling of attention scores before applying softmax.
+            divisible_m = M % BLOCK_M == 0
+            divisible_n = N % BLOCK_N == 0
 
-        Returns:
-            out: (torch.Tensor): The output. The shape is (batch_size, nheads, seqlen_q, headdim).
-        """
-        o, L = standalone_forward(q1, k1, q2, k2, v, w, causal, sm_scale)
+            grid = (triton.cdiv(M, BLOCK_M), H, B)
+            o = torch.empty_like(q1)
+            L = torch.empty((B, H, M), device=q1.device, dtype=torch.float32)
+            P_SEQ = N - M
+            _fwd_kernel[grid](
+                q1, k1, q2, k2, v, sm_scale,
+                L,
+                o,
+                q1.stride(0), q1.stride(1), q1.stride(2), q1.stride(3),
+                k1.stride(0), k1.stride(1), k1.stride(2), k1.stride(3),
+                q2.stride(0), q2.stride(1), q2.stride(2), q2.stride(3),
+                k2.stride(0), k2.stride(1), k2.stride(2), k2.stride(3),
+                v.stride(0), v.stride(1), v.stride(2), v.stride(3),
+                o.stride(0), o.stride(1), o.stride(2), o.stride(3),
+                B, H, M, P_SEQ,
+                w = w, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_DMODEL=D,
+                IS_CAUSAL=causal,
+                DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
+                num_warps=num_warps, num_stages=num_stages,
+            )
 
         ctx.save_for_backward(q1, k1, q2, k2, v, o, L)
         ctx.sm_scale = sm_scale
@@ -55,193 +73,94 @@ class PiecewiseAttention(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, do):
-        do = do.contiguous()  
-
         q1, k1, q2, k2, v, o, L = ctx.saved_tensors
         w = ctx.w
         causal = ctx.causal
         sm_scale = ctx.sm_scale
 
-        dq1, dk1, dq2, dk2, dv = standalone_backward(q1, k1, q2, k2, v, w, causal, sm_scale, o, L, do)
+        B, H, M, D = q1.shape
+        N = k1.shape[2]
+        P_SEQ = N - M
+
+        if sm_scale is None:
+            sm_scale = 1. / math.sqrt(D)
+
+        # to work around https://github.com/openai/triton/issues/2441
+        device = torch.cuda.device_of(q1)
+        with torch.cuda.device(device):
+            config = get_bwd_config(B, H, M, N, D, causal)
+            BLOCK_M, BLOCK_N, num_stages, num_warps = config
+
+            divisible_m = M % BLOCK_M == 0
+            divisible_n = N % BLOCK_N == 0
+
+            delta = torch.empty((B, H, M), device=q1.device, dtype=torch.float32)
+            grid = (triton.cdiv(M, BLOCK_M), H, B)
+            _bwd_preprocess[grid](
+                o, do,
+                delta,
+                o.stride(0), o.stride(1), o.stride(2), o.stride(3),
+                do.stride(0), do.stride(1), do.stride(2), do.stride(3),
+                delta.stride(0), delta.stride(1), delta.stride(2),
+                M,
+                BLOCK_M=BLOCK_M, D_HEAD=D,
+                DIVISIBLE_M=divisible_m,
+            )
+
+            dk1 = torch.empty_like(k1)
+            dk2 = torch.empty_like(k2)
+            dv = torch.empty_like(v)
+            grid = (triton.cdiv(N, BLOCK_N), H, B)
+            _bwd_kv_kernel[grid](
+                q1, k1, q2, k2, v, sm_scale, do, 
+                dk1,dk2, dv,
+                L, delta,
+                q1.stride(0), q1.stride(1), q1.stride(2), q1.stride(3),
+                k1.stride(0), k1.stride(1), k1.stride(2), k1.stride(3),
+                q2.stride(0), q2.stride(1), q2.stride(2), q2.stride(3),
+                k2.stride(0), k2.stride(1), k2.stride(2), k2.stride(3),
+                v.stride(0), v.stride(1), v.stride(2), v.stride(3),
+                do.stride(0), do.stride(1), do.stride(2), do.stride(3),
+                dk1.stride(0), dk1.stride(1), dk1.stride(2), dk1.stride(3),
+                dk2.stride(0), dk2.stride(1), dk2.stride(2), dk2.stride(3),
+                dv.stride(0), dv.stride(1), dv.stride(2), dv.stride(3),
+                q1.shape[0], q1.shape[1], q1.shape[2], P_SEQ, 
+                w=w,
+                BLOCK_M=BLOCK_M, BLOCK_DMODEL=D,
+                BLOCK_N=BLOCK_N,
+                CAUSAL=causal,
+                DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
+                num_stages=num_stages,
+                num_warps=num_warps,
+            )
+        
+            dq1 = torch.zeros_like(q1)
+            dq2 = torch.zeros_like(q2)
+            grid = (triton.cdiv(M, BLOCK_M), H, B)
+            _bwd_q_kernel[grid](
+                q1, k1, q2, k2, v, sm_scale, do, 
+                dq1, dq2,
+                L, delta,
+                q1.stride(0), q1.stride(1), q1.stride(2), q1.stride(3),
+                k1.stride(0), k1.stride(1), k1.stride(2), k1.stride(3),
+                q2.stride(0), q2.stride(1), q2.stride(2), q2.stride(3),
+                k2.stride(0), k2.stride(1), k2.stride(2), k2.stride(3),
+                v.stride(0), v.stride(1), v.stride(2), v.stride(3),
+                do.stride(0), do.stride(1), do.stride(2), do.stride(3),
+                dq1.stride(0), dq1.stride(1), dq1.stride(2), dq1.stride(3),
+                dq2.stride(0), dq2.stride(1), dq2.stride(2), dq2.stride(3),
+                q1.shape[0], q1.shape[1], q1.shape[2], P_SEQ, 
+                w=w,
+                BLOCK_M=BLOCK_M, BLOCK_DMODEL=D,
+                BLOCK_N=BLOCK_N,
+                CAUSAL=causal,
+                DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
+                num_stages=num_stages,
+                num_warps=num_warps,
+            )
 
         return dq1, dk1, dq2, dk2, dv, None, None, None
 
-def standalone_forward(q1, k1, q2, k2, v, w, causal, sm_scale):
-    # to work around https://github.com/openai/triton/issues/2441
-    orginal_device_index = torch.cuda.current_device()
-    device_index = q1.device.index
-    torch.cuda.set_device(device_index)
-
-    # shape constraints
-    Dq1, Dk1, Dq2, Dk2, Dv = q1.shape[-1], k1.shape[-1], q2.shape[-1], k2.shape[-1], v.shape[-1]
-    assert Dq1 == Dk1 == Dq2 == Dk2 == Dv
-    assert Dk1 in {16, 32, 64, 128}
-
-    B, H, M, D = q1.shape
-    if sm_scale is None:
-        sm_scale = 1. / math.sqrt(D)
-    N = k1.shape[2]
-
-    # tune for A100, device_capability(8, 0)
-    if torch.cuda.get_device_capability(device_index) == (8, 0): 
-        if not causal:
-            if D <= 64:
-                BLOCK_M, BLOCK_N, num_stages, num_warps = 128, 32, 3, 4
-            else:
-                BLOCK_M, BLOCK_N, num_stages, num_warps = 128, 64, 3, 8
-        else:
-            if D <= 64:
-                BLOCK_M, BLOCK_N, num_stages, num_warps = 128, 32, 3, 4
-            else:
-                BLOCK_M, BLOCK_N, num_stages, num_warps = 128, 64, 4, 8
-    else: # tune for RTX-3090, device_capability(8, 6)
-        if not causal:
-            if D <= 64:
-                BLOCK_M, BLOCK_N, num_stages, num_warps = 64, 32, 3, 4
-            else:
-                BLOCK_M, BLOCK_N, num_stages, num_warps = 128, 64, 3, 8
-        else:
-            if D <= 64:
-                BLOCK_M, BLOCK_N, num_stages, num_warps = 64, 32, 3, 4
-            else:
-                BLOCK_M, BLOCK_N, num_stages, num_warps = 128, 32, 2, 8
-
-    divisible_m = M % BLOCK_M == 0
-    divisible_n = N % BLOCK_N == 0
-
-    grid = (triton.cdiv(M, BLOCK_M), H, B)
-    o = torch.empty_like(q1)
-    L = torch.empty((B, H, M), device=q1.device, dtype=torch.float32)
-    P_SEQ = N - M
-    _fwd_kernel[grid](
-        q1, k1, q2, k2, v, sm_scale,
-        L,
-        o,
-        q1.stride(0), q1.stride(1), q1.stride(2), q1.stride(3),
-        k1.stride(0), k1.stride(1), k1.stride(2), k1.stride(3),
-        q2.stride(0), q2.stride(1), q2.stride(2), q2.stride(3),
-        k2.stride(0), k2.stride(1), k2.stride(2), k2.stride(3),
-        v.stride(0), v.stride(1), v.stride(2), v.stride(3),
-        o.stride(0), o.stride(1), o.stride(2), o.stride(3),
-        B, H, M, P_SEQ,
-        w = w, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_DMODEL=D,
-        IS_CAUSAL=causal,
-        DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
-        num_warps=num_warps, num_stages=num_stages,
-    )
-    torch.cuda.set_device(orginal_device_index)
-    return o, L
-
-def standalone_backward(q1, k1, q2, k2, v, w, causal, sm_scale, o, L, do):
-    # to work around https://github.com/openai/triton/issues/2441
-    orginal_device_index = torch.cuda.current_device()
-    device_index = q1.device.index
-    torch.cuda.set_device(device_index)
-
-    B, H, M, D = q1.shape
-    if sm_scale is None:
-        sm_scale = 1. / math.sqrt(D)
-
-    # tune for A100, device_capability(8, 0)
-    if torch.cuda.get_device_capability(device_index) == (8, 0): 
-        if not causal:
-            if D <= 64:
-                BLOCK_M, BLOCK_N, num_stages, num_warps = 64, 64, 2, 4
-            else:
-                BLOCK_M, BLOCK_N, num_stages, num_warps = 128, 64, 2, 8
-        else:
-            if D <= 64:
-                BLOCK_M, BLOCK_N, num_stages, num_warps = 64, 64, 3, 4
-            else:
-                BLOCK_M, BLOCK_N, num_stages, num_warps = 32, 64, 2, 4
-        
-        BLOCK_M = 64 if D<=64 else 128
-        BLOCK_N = 64
-        num_stages = 1 if D<=64 else (2 if not causal else 1)
-        num_warps = 4 if D <=64 else 8
-    else: # tune for RTX-3090, device_capability(8, 6)
-        if not causal:
-            if D <= 64:
-                BLOCK_M, BLOCK_N, num_stages, num_warps = 32, 32, 2, 4
-            else:
-                BLOCK_M, BLOCK_N, num_stages, num_warps = 32, 64, 2, 8
-        else:
-            if D <= 64:
-                BLOCK_M, BLOCK_N, num_stages, num_warps = 32, 32, 2, 4
-            else:
-                BLOCK_M, BLOCK_N, num_stages, num_warps = 32, 64, 2, 8
-
-    N = k1.shape[2]
-    P_SEQ = N - M
-    divisible_m = M % BLOCK_M == 0
-    divisible_n = N % BLOCK_N == 0
-
-    delta = torch.empty((B, H, M), device=q1.device, dtype=torch.float32)
-    grid = (triton.cdiv(M, BLOCK_M), H, B)
-    _bwd_preprocess[grid](
-        o, do,
-        delta,
-        o.stride(0), o.stride(1), o.stride(2), o.stride(3),
-        do.stride(0), do.stride(1), do.stride(2), do.stride(3),
-        delta.stride(0), delta.stride(1), delta.stride(2),
-        M,
-        BLOCK_M=BLOCK_M, D_HEAD=D,
-        DIVISIBLE_M=divisible_m,
-    )
-
-    dk1 = torch.empty_like(k1)
-    dk2 = torch.empty_like(k2)
-    dv = torch.empty_like(v)
-    grid = (triton.cdiv(N, BLOCK_N), H, B)
-    _bwd_kv_kernel[grid](
-        q1, k1, q2, k2, v, sm_scale, do, 
-        dk1,dk2, dv,
-        L, delta,
-        q1.stride(0), q1.stride(1), q1.stride(2), q1.stride(3),
-        k1.stride(0), k1.stride(1), k1.stride(2), k1.stride(3),
-        q2.stride(0), q2.stride(1), q2.stride(2), q2.stride(3),
-        k2.stride(0), k2.stride(1), k2.stride(2), k2.stride(3),
-        v.stride(0), v.stride(1), v.stride(2), v.stride(3),
-        do.stride(0), do.stride(1), do.stride(2), do.stride(3),
-        dk1.stride(0), dk1.stride(1), dk1.stride(2), dk1.stride(3),
-        dk2.stride(0), dk2.stride(1), dk2.stride(2), dk2.stride(3),
-        dv.stride(0), dv.stride(1), dv.stride(2), dv.stride(3),
-        q1.shape[0], q1.shape[1], q1.shape[2], P_SEQ, 
-        w=w,
-        BLOCK_M=BLOCK_M, BLOCK_DMODEL=D,
-        BLOCK_N=BLOCK_N,
-        CAUSAL=causal,
-        DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
-        num_stages=num_stages,
-        num_warps=num_warps,
-    )
-    
-    dq1 = torch.zeros_like(q1)
-    dq2 = torch.zeros_like(q2)
-    grid = (triton.cdiv(M, BLOCK_M), H, B)
-    _bwd_q_kernel[grid](
-        q1, k1, q2, k2, v, sm_scale, do, 
-        dq1, dq2,
-        L, delta,
-        q1.stride(0), q1.stride(1), q1.stride(2), q1.stride(3),
-        k1.stride(0), k1.stride(1), k1.stride(2), k1.stride(3),
-        q2.stride(0), q2.stride(1), q2.stride(2), q2.stride(3),
-        k2.stride(0), k2.stride(1), k2.stride(2), k2.stride(3),
-        v.stride(0), v.stride(1), v.stride(2), v.stride(3),
-        do.stride(0), do.stride(1), do.stride(2), do.stride(3),
-        dq1.stride(0), dq1.stride(1), dq1.stride(2), dq1.stride(3),
-        dq2.stride(0), dq2.stride(1), dq2.stride(2), dq2.stride(3),
-        q1.shape[0], q1.shape[1], q1.shape[2], P_SEQ, 
-        w=w,
-        BLOCK_M=BLOCK_M, BLOCK_DMODEL=D,
-        BLOCK_N=BLOCK_N,
-        CAUSAL=causal,
-        DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
-        num_stages=num_stages,
-        num_warps=num_warps,
-    )
-    torch.cuda.set_device(orginal_device_index)
-    return dq1, dk1, dq2, dk2, dv
 
 def attention(q1, k1, q2, k2, v, dist_threshold, causal=False, sm_scale=None):
     """
@@ -266,6 +185,36 @@ def attention(q1, k1, q2, k2, v, dist_threshold, causal=False, sm_scale=None):
         out: (torch.Tensor): The output. The shape is (batch_size, nheads, seqlen_q, headdim).
     """
     return PiecewiseAttention.apply(q1, k1, q2, k2, v, dist_threshold, causal, sm_scale)
+
+# --------------------------- Forward ---------------------------
+def get_fwd_config(B, H, M, N, D, causal):
+    # A100
+    if torch.cuda.get_device_capability() == (8, 0): 
+        if not causal:
+            if D <= 64:
+                BLOCK_M, BLOCK_N, num_stages, num_warps = 128, 32, 3, 4
+            else:
+                BLOCK_M, BLOCK_N, num_stages, num_warps = 128, 64, 3, 8
+        else:
+            if D <= 64:
+                BLOCK_M, BLOCK_N, num_stages, num_warps = 128, 32, 3, 4
+            else:
+                BLOCK_M, BLOCK_N, num_stages, num_warps = 128, 64, 4, 8
+    # RTX-3090, ...
+    elif torch.cuda.get_device_capability() == (8, 6):
+        if not causal:
+            if D <= 64:
+                BLOCK_M, BLOCK_N, num_stages, num_warps = 64, 32, 3, 4
+            else:
+                BLOCK_M, BLOCK_N, num_stages, num_warps = 128, 64, 3, 8
+        else:
+            if D <= 64:
+                BLOCK_M, BLOCK_N, num_stages, num_warps = 64, 32, 3, 4
+            else:
+                BLOCK_M, BLOCK_N, num_stages, num_warps = 128, 32, 2, 8
+    else:
+        BLOCK_M, BLOCK_N, num_stages, num_warps = 32, 32, 1, 4
+    return BLOCK_M, BLOCK_N, num_stages, num_warps
 
 @triton.jit
 def _fwd_kernel(
@@ -408,6 +357,40 @@ def _fwd_kernel(
         tl.store(l_ptrs, l_i, mask=mask_m)
         tl.store(o_ptrs, acc.to(input_dtype), mask=mask_m[:, None])
 
+# --------------------------- Backward ---------------------------
+def get_bwd_config(B, H, M, N, D, causal):
+    # A100
+    if torch.cuda.get_device_capability() == (8, 0): 
+        if not causal:
+            if D <= 64:
+                BLOCK_M, BLOCK_N, num_stages, num_warps = 64, 64, 2, 4
+            else:
+                BLOCK_M, BLOCK_N, num_stages, num_warps = 128, 64, 2, 8
+        else:
+            if D <= 64:
+                BLOCK_M, BLOCK_N, num_stages, num_warps = 64, 64, 3, 4
+            else:
+                BLOCK_M, BLOCK_N, num_stages, num_warps = 32, 64, 2, 4
+        
+        BLOCK_M = 64 if D<=64 else 128
+        BLOCK_N = 64
+        num_stages = 1 if D<=64 else (2 if not causal else 1)
+        num_warps = 4 if D <=64 else 8
+    # RTX-3090, ...
+    elif torch.cuda.get_device_capability() == (8, 6):
+        if not causal:
+            if D <= 64:
+                BLOCK_M, BLOCK_N, num_stages, num_warps = 32, 32, 2, 4
+            else:
+                BLOCK_M, BLOCK_N, num_stages, num_warps = 32, 64, 2, 8
+        else:
+            if D <= 64:
+                BLOCK_M, BLOCK_N, num_stages, num_warps = 32, 32, 2, 4
+            else:
+                BLOCK_M, BLOCK_N, num_stages, num_warps = 32, 64, 2, 8
+    else:
+        BLOCK_M, BLOCK_N, num_stages, num_warps = 32, 32, 1, 4
+    return BLOCK_M, BLOCK_N, num_stages, num_warps
 
 @triton.jit
 def _bwd_preprocess(
@@ -450,6 +433,7 @@ def _bwd_preprocess(
         tl.store(d_ptrs, delta)
     else:
         tl.store(d_ptrs, delta, mask=mask_m)
+
 
 @triton.jit
 def _bwd_kv_kernel(
@@ -792,4 +776,3 @@ def _bwd_q_kernel(
     else:
         tl.store(dq1_ptrs, dq1.to(input_dtype), mask=mask_m[:, None])
         tl.store(dq2_ptrs, dq2.to(input_dtype), mask=mask_m[:, None])
-
