@@ -101,8 +101,13 @@ python piecewise_benchmark.py
 Triton 语言实现的 FlashAttention, 接口如下。
 
 ```python
-flash_attention(q, k, v, causal=False, sm_scale=None)
+flash_attention(q, k, v, causal=False, sm_scale=None, return_log_normalizer=False, return_total_attention=False)
 ```
+
+除了 attention 的输出之外，它还可以根据 `return_log_normalizer` 和 `return_total_attention=False` 返回一些额外的输出。
+
+1. log_normalizer: 形状 (batch_size, num_heads, seqlen_q), attention 运算内部的 softmax 运算的 log normalizer.
+2. total_attention: 形状 (batch_size, num_heads, seqlen_q). attention weights 沿着 q 的序列轴上求和的结果。
 
 ### piecewise_attention
 

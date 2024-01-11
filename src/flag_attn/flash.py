@@ -2,13 +2,14 @@ import math
 import torch
 import triton
 import triton.language as tl
+from flag_attn.total import _total_attention_kernel
 
 __all__ = ["attention"]
 
 # --------------------------- public API ---------------------------
 class FlashAttention(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q, k, v, causal, sm_scale):
+    def forward(ctx, q, k, v, causal, sm_scale, return_log_normalizer, return_total_attention):
         Dq, Dk, Dv = q.shape[-1], k.shape[-1], v.shape[-1]
         assert Dq == Dk == Dv
         assert Dk in {16, 32, 64, 128}
@@ -45,14 +46,38 @@ class FlashAttention(torch.autograd.Function):
                 num_warps=num_warps, num_stages=num_stages,
             )
 
+            if return_total_attention:
+                tot_attn = torch.empty((B, H, N), device=q.device, dtype=torch.float32)
+                grid = (triton.cdiv(N, BLOCK_N), H, B)
+                _total_attention_kernel[grid](
+                    q, k, L, tot_attn, sm_scale, 
+                    q.stride(0), q.stride(1), q.stride(2), q.stride(3),
+                    k.stride(0), k.stride(1), k.stride(2), k.stride(3),
+                    B, H, M, P_SEQ,
+                    BLOCK_M=BLOCK_M, BLOCK_DMODEL=D, BLOCK_N=BLOCK_N, 
+                    CAUSAL=causal,
+                    DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
+                    num_stages=num_stages, num_warps=num_warps,
+                )
+
         # autograd context maintenance
         ctx.save_for_backward(q, k, v, o, L)
         ctx.sm_scale = sm_scale
         ctx.causal = causal
-        return o
+
+        has_extra_return = return_log_normalizer or return_total_attention
+        if has_extra_return:
+            outs = (
+                o,
+                L if return_log_normalizer else None,
+                tot_attn if return_total_attention else None
+            )
+            return outs
+        else:
+            return o
 
     @staticmethod
-    def backward(ctx, do):
+    def backward(ctx, do, *ignored):
         q, k, v, o, L = ctx.saved_tensors
         sm_scale = ctx.sm_scale
         causal = ctx.causal
@@ -122,10 +147,12 @@ class FlashAttention(torch.autograd.Function):
                 num_stages=num_stages, num_warps = num_warps,
             )
 
-        return dq, dk, dv, None, None, None
+        return dq, dk, dv, None, None, None, None
 
 
-def attention(q, k, v, causal=False, sm_scale=None):
+def attention(q, k, v, causal=False, sm_scale=None, 
+              return_log_normalizer=False, return_total_attention=False,
+):
     """
     An implementation of FlashAttention v2(https://arxiv.org/abs/2307.08691).
 
@@ -135,11 +162,18 @@ def attention(q, k, v, causal=False, sm_scale=None):
         v(torch.Tensor): The values. The shape is (batch_size, nheads, seqlen_k, headdim).
         causal(bool): Whether causal masking is applied to attention scores before applying softmax.
         sm_scale(float): The scaling of attention scores before applying softmax.
+        return_log_normalizer(bool): Whether to return the log normalizer of softmax inside attention.
+        return_total_attention(bool): Whether to return the sum of attention along q's sequence dimendion.
 
     Returns:
-        out: (torch.Tensor): The output. The shape is (batch_size, nheads, seqlen_q, headdim).
+        out(torch.Tensor): The output. The shape is (batch_size, nheads, seqlen_q, headdim).
+
+        If `return_log_normalizer` or `return_total_attention`, return the following results in addition.
+
+        log_normalizer(torch.Tensor): The log normalizer. The shape is (batch_size, nheads, seqlen_q).
+        total_attention(torch.Tensor): The total attention. The shape is (batch_size, nheads, seqlen_k).
     """
-    return FlashAttention.apply(q, k, v, causal, sm_scale)
+    return FlashAttention.apply(q, k, v, causal, sm_scale, return_log_normalizer, return_total_attention)
 
 
 # --------------------------- Forward ---------------------------
