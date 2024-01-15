@@ -104,8 +104,13 @@ python piecewise_benchmark.py
 The implementation of FlashAttention in the Triton language. The interface is.
 
 ```python
-flash_attention(q, k, v, causal=False, sm_scale=None)
+flash_attention(q, k, v, causal=False, sm_scale=None, return_log_normalizer=False, return_total_attention=False)
 ```
+
+In addition to the attention outputs, it can return some extra outputs dependes on `return_log_normalizer` and `return_total_attention`.
+
+1. log_normalizer: shape (batch_size, num_heads, seqlen_q). The log normalizer of the softmax inside attention operation.
+2. total_attention: shape (batch_size, num_heads, seqlen_k). The sum of attention weights along q's sequence axis.
 
 ### piecewise_attention
 

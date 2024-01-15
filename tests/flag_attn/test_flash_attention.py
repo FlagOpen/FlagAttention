@@ -105,3 +105,47 @@ def test_attention_bwd(B, H, T, D, P_SEQ, causal, stride_order, dtype, scale, de
     assert gk_triton_max_diff < 2 * gk_torch_max_diff + 1e-5
     assert gv_triton_max_diff < 2 * gv_torch_max_diff + 1e-5
 
+
+@pytest.mark.parametrize('device_id', list(range(torch.cuda.device_count())))
+@pytest.mark.parametrize('scale', [1.0, 2.0, 3.0, 4.0])
+@pytest.mark.parametrize('B, H, T, D, P_SEQ', [
+    (2, 4, 512, 128, 100),
+    (2, 4, 1024, 64, 10), 
+    (2, 4, 2048, 32, 0),
+    (2, 4, 4096, 16, 0),
+    (2, 4, 4000, 32, 0),
+    (2, 4, 4000, 64, 96),
+    (1, 2, 8192, 16, 10),
+    (1, 2, 8192, 32, 0),
+])
+@pytest.mark.parametrize('causal', [False])
+@pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize('stride_order', ['BHTD', 'BTHD'])
+def test_attention_with_aux_outs(B, H, T, D, P_SEQ, causal, stride_order, dtype, scale, device_id):
+    device = f"cuda:{device_id}"
+    if stride_order == "BHTD":
+        q = torch.empty((B, H, T, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
+        k = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
+        v = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
+    else:
+        q = torch.empty((B, T, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
+        k = torch.empty((B, T + P_SEQ, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
+        v = torch.empty((B, T + P_SEQ, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
+
+    o_ref, log_norm_ref, tot_attn_ref = flag_attn.testing.flash_attention(q, k, v, causal, return_log_normalizer=True, return_total_attention=True, upcast=True)
+    o_torch, log_norm_torch, tot_attn_torch = flag_attn.testing.flash_attention(q, k, v, causal, return_log_normalizer=True, return_total_attention=True, upcast=False)
+    o_hyp, log_norm_hyp, tot_attn_hyp = flag_attn.flash_attention(q, k, v, causal, return_log_normalizer=True, return_total_attention=True)
+    
+
+    torch_max_diff = max_diff(o_torch, o_ref)
+    triton_max_diff = max_diff(o_hyp, o_ref)
+    assert triton_max_diff <= 2 * torch_max_diff + 1e-5
+
+    torch_max_diff = max_diff(log_norm_torch, log_norm_ref)
+    triton_max_diff = max_diff(log_norm_hyp, log_norm_ref)
+    assert triton_max_diff <= 2 * torch_max_diff + 1e-5
+
+    torch_max_diff = max_diff(tot_attn_torch, tot_attn_ref)
+    triton_max_diff = max_diff(tot_attn_hyp, tot_attn_ref)
+    assert triton_max_diff <= 2 * torch_max_diff + 1e-5
+
