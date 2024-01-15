@@ -32,6 +32,7 @@ class PiecewiseAttention(torch.autograd.Function):
 
         B, H, M, D = q1.shape
         N = k1.shape[2]
+        P_SEQ = N - M if N > M else 0
         if sm_scale is None:
             sm_scale = 1. / math.sqrt(D)
         
@@ -47,7 +48,7 @@ class PiecewiseAttention(torch.autograd.Function):
             grid = (triton.cdiv(M, BLOCK_M), H, B)
             o = torch.empty_like(q1)
             L = torch.empty((B, H, M), device=q1.device, dtype=torch.float32)
-            P_SEQ = N - M
+            
             _fwd_kernel[grid](
                 q1, k1, q2, k2, v, sm_scale,
                 L,
@@ -58,7 +59,7 @@ class PiecewiseAttention(torch.autograd.Function):
                 k2.stride(0), k2.stride(1), k2.stride(2), k2.stride(3),
                 v.stride(0), v.stride(1), v.stride(2), v.stride(3),
                 o.stride(0), o.stride(1), o.stride(2), o.stride(3),
-                B, H, M, P_SEQ,
+                B, H, M, N, P_SEQ,
                 w = w, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_DMODEL=D,
                 IS_CAUSAL=causal,
                 DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
@@ -80,7 +81,7 @@ class PiecewiseAttention(torch.autograd.Function):
 
         B, H, M, D = q1.shape
         N = k1.shape[2]
-        P_SEQ = N - M
+        P_SEQ = N - M if N > M else 0
 
         if sm_scale is None:
             sm_scale = 1. / math.sqrt(D)
@@ -124,7 +125,7 @@ class PiecewiseAttention(torch.autograd.Function):
                 dk1.stride(0), dk1.stride(1), dk1.stride(2), dk1.stride(3),
                 dk2.stride(0), dk2.stride(1), dk2.stride(2), dk2.stride(3),
                 dv.stride(0), dv.stride(1), dv.stride(2), dv.stride(3),
-                q1.shape[0], q1.shape[1], q1.shape[2], P_SEQ, 
+                B, H, M, N, P_SEQ, 
                 w=w,
                 BLOCK_M=BLOCK_M, BLOCK_DMODEL=D,
                 BLOCK_N=BLOCK_N,
@@ -149,7 +150,7 @@ class PiecewiseAttention(torch.autograd.Function):
                 do.stride(0), do.stride(1), do.stride(2), do.stride(3),
                 dq1.stride(0), dq1.stride(1), dq1.stride(2), dq1.stride(3),
                 dq2.stride(0), dq2.stride(1), dq2.stride(2), dq2.stride(3),
-                q1.shape[0], q1.shape[1], q1.shape[2], P_SEQ, 
+                B, H, M, N, P_SEQ,  
                 w=w,
                 BLOCK_M=BLOCK_M, BLOCK_DMODEL=D,
                 BLOCK_N=BLOCK_N,
@@ -227,7 +228,7 @@ def _fwd_kernel(
     stride_k2z, stride_k2h, stride_k2n, stride_k2k,
     stride_vz, stride_vh, stride_vn, stride_vk,
     stride_oz, stride_oh, stride_om, stride_ok,
-    Z, H, N_CTX, P_SEQ,
+    Z, H, M, N, P_SEQ,
     w: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -253,7 +254,7 @@ def _fwd_kernel(
     K2 += off_z * stride_k2z + off_h * stride_k2h
     V += off_z * stride_vz + off_h * stride_vh
     O += off_z * stride_oz + off_h * stride_oh
-    L += (off_z * H + off_h) * N_CTX  # L: shape(B, H, N_CTX), C-contiguous
+    L += (off_z * H + off_h) * M  # L: shape(B, H, N_CTX), C-contiguous
 
     offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n_base = tl.arange(0, BLOCK_N)
@@ -279,7 +280,7 @@ def _fwd_kernel(
         q1 = tl.load(q1_ptrs)
         q2 = tl.load(q2_ptrs)
     else:
-        mask_m = offs_m < N_CTX
+        mask_m = offs_m < M
         q1 = tl.load(q1_ptrs, mask=mask_m[:, None])
         q2 = tl.load(q2_ptrs, mask=mask_m[:, None])
 
@@ -294,9 +295,9 @@ def _fwd_kernel(
     # loop over k, v and update accumulator
     # see note "Loop-Bound-For-N"
     if IS_CAUSAL:
-        hi = tl.minimum(N_CTX + P_SEQ, P_SEQ + (start_m + 1) * BLOCK_M)
+        hi = tl.minimum(N, P_SEQ + (start_m + 1) * BLOCK_M)
     else:
-        hi = N_CTX + P_SEQ
+        hi = N
     
     for start_n in range(0, hi, BLOCK_N):
         # -- offsets & masking --
@@ -310,7 +311,7 @@ def _fwd_kernel(
             k2 = tl.load(k2_ptrs)
             v = tl.load(v_ptrs)
         else:
-            mask_n = offs_n < (N_CTX + P_SEQ)
+            mask_n = offs_n < N
             k1 = tl.load(k1_ptrs, mask=mask_n[:, None])
             k2 = tl.load(k2_ptrs, mask=mask_n[:, None])
             v = tl.load(v_ptrs, mask=mask_n[:, None])
@@ -450,7 +451,7 @@ def _bwd_kv_kernel(
     stride_dk1z, stride_dk1h, stride_dk1n, stride_dk1k,
     stride_dk2z, stride_dk2h, stride_dk2n, stride_dk2k,
     stride_dvz, stride_dvh, stride_dvn, stride_dvk,
-    Z, H, N_CTX, P_SEQ, 
+    Z, H, M, N, P_SEQ, 
     w: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -473,8 +474,8 @@ def _bwd_kv_kernel(
     K2 += off_z * stride_k2z + off_h * stride_k2h
     V += off_z * stride_vz + off_h * stride_vh
     DO += off_z * stride_doz + off_h * stride_doh
-    D += (off_z * H + off_h) * N_CTX
-    L += (off_z * H + off_h) * N_CTX
+    D += (off_z * H + off_h) * M
+    L += (off_z * H + off_h) * M
 
     # offset pointers for batch/head
     DK1 += off_z * stride_dk1z + off_h * stride_dk1h
@@ -511,7 +512,7 @@ def _bwd_kv_kernel(
         k2 = tl.load(k2_ptrs)
         v = tl.load(v_ptrs)
     else:
-        mask_n = offs_n < (N_CTX + P_SEQ)
+        mask_n = offs_n < N
         k1 = tl.load(k1_ptrs, mask=mask_n[None, :])
         k2 = tl.load(k2_ptrs, mask=mask_n[None, :])
         v = tl.load(v_ptrs, mask=mask_n[:, None])
@@ -522,7 +523,7 @@ def _bwd_kv_kernel(
     dv = tl.zeros([BLOCK_N, BLOCK_DMODEL], dtype=tl.float32)
     
     # loop over a column
-    for start_m in range(lo, N_CTX, BLOCK_M):
+    for start_m in range(lo, M, BLOCK_M):
         start_m = tl.multiple_of(start_m, BLOCK_M)
         offs_m = start_m + offs_m_base
         
@@ -534,7 +535,7 @@ def _bwd_kv_kernel(
             delta = tl.load(D + offs_m)
             l = tl.load(L + offs_m)
         else:
-            mask_m = offs_m < N_CTX
+            mask_m = offs_m < M
             q1 = tl.load(q1_ptrs, mask=mask_m[:, None])
             q2 = tl.load(q2_ptrs, mask=mask_m[:, None])
             do = tl.load(do_ptrs, mask=mask_m[:, None]) # (BLOCK_M, BLOCK_DMODEL)
@@ -629,7 +630,7 @@ def _bwd_q_kernel(
     stride_doz, stride_doh, stride_dom, stride_dok,
     stride_dq1z, stride_dq1h, stride_dq1m, stride_dq1k,
     stride_dq2z, stride_dq2h, stride_dq2m, stride_dq2k,
-    Z, H, N_CTX, P_SEQ, 
+    Z, H, M, N, P_SEQ, 
     w: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -655,8 +656,8 @@ def _bwd_q_kernel(
     K2 += off_z * stride_k2z + off_h * stride_k2h
     V += off_z * stride_vz + off_h * stride_vh
     DO += off_z * stride_doz + off_h * stride_doh
-    D += (off_z * H + off_h) * N_CTX
-    L += (off_z * H + off_h) * N_CTX
+    D += (off_z * H + off_h) * M
+    L += (off_z * H + off_h) * M
 
     # offset pointers for batch/head
     DQ1 += off_z * stride_dq1z + off_h * stride_dq1h
@@ -690,7 +691,7 @@ def _bwd_q_kernel(
         delta = tl.load(d_ptrs)
         l = tl.load(l_ptrs)
     else:
-        mask_m = offs_m < N_CTX
+        mask_m = offs_m < M
         q1 = tl.load(q1_ptrs, mask=mask_m[:, None])
         q2 = tl.load(q2_ptrs, mask=mask_m[:, None])
         do = tl.load(do_ptrs, mask=mask_m[:, None])
@@ -704,9 +705,9 @@ def _bwd_q_kernel(
     # loop over k, v and update accumulator
     # see note "Loop-Bound-For-N"
     if CAUSAL:
-        hi = tl.minimum(N_CTX + P_SEQ, P_SEQ + (start_m + 1) * BLOCK_M)
+        hi = tl.minimum(N, P_SEQ + (start_m + 1) * BLOCK_M)
     else:
-        hi = N_CTX + P_SEQ
+        hi = N
 
     # loop over a row
     for start_n in range(0, hi, BLOCK_N):
@@ -718,7 +719,7 @@ def _bwd_q_kernel(
             k1 = tl.load(k1_ptrs)
             k2 = tl.load(k2_ptrs)
         else:
-            mask_n = offs_n < (N_CTX + P_SEQ)
+            mask_n = offs_n < N
             v = tl.load(v_ptrs, mask=mask_n[:, None])
             k1 = tl.load(k1_ptrs, mask=mask_n[:, None])
             k2 = tl.load(k2_ptrs, mask=mask_n[:, None])

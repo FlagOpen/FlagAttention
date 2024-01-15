@@ -11,31 +11,32 @@ def max_diff(a, b):
 
 @pytest.mark.parametrize('device_id', list(range(torch.cuda.device_count())))
 @pytest.mark.parametrize('scale', [1.0, 2.0, 3.0, 4.0])
-@pytest.mark.parametrize('B, H, T, D, P_SEQ', [
-    (2, 4, 512, 128, 100),
-    (2, 4, 1024, 64, 10), 
-    (2, 4, 2048, 32, 0),
-    (2, 4, 4096, 16, 0),
-    (1, 2, 8192, 16, 0),
-    (1, 2, 8192, 32, 0),
+@pytest.mark.parametrize('B, H, M, N, D', [
+    (2, 4, 512, 612, 128),
+    (2, 4, 1024, 1034, 64), 
+    (2, 4, 2048, 2048, 32),
+    (2, 4, 4096, 4096, 16),
+    (2, 4, 4096, 4001, 16),
+    (1, 2, 8192, 8192, 16),
+    (1, 2, 8192, 8192, 32),
 ])
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('stride_order', ['BHTD', 'BTHD'])
 @pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
-def test_attention_fwd(B, H, T, D, P_SEQ, causal, stride_order, dtype, scale, device_id):
+def test_attention_fwd(B, H, M, N, D, causal, stride_order, dtype, scale, device_id):
     device = f"cuda:{device_id}"
     if stride_order == "BHTD":
-        q1 = torch.empty((B, H, T, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
-        q2 = torch.empty((B, H, T, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
-        k1 = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
-        k2 = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
-        v = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
+        q1 = torch.empty((B, H, M, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
+        q2 = torch.empty((B, H, M, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
+        k1 = torch.empty((B, H, N, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
+        k2 = torch.empty((B, H, N, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
+        v = torch.empty((B, H, N, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
     else:
-        q1 = torch.empty((B, T, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
-        q2 = torch.empty((B, T, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
-        k1 = torch.empty((B, T + P_SEQ, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
-        k2 = torch.empty((B, T + P_SEQ, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
-        v = torch.empty((B, T + P_SEQ, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
+        q1 = torch.empty((B, M, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
+        q2 = torch.empty((B, M, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
+        k1 = torch.empty((B, N, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
+        k2 = torch.empty((B, N, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
+        v = torch.empty((B, N, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
     w = 780
 
     o_ref = flag_attn.testing.piecewise_attention(q1, k1, q2, k2, v, w, causal=causal, upcast=True)
@@ -52,35 +53,36 @@ def test_attention_fwd(B, H, T, D, P_SEQ, causal, stride_order, dtype, scale, de
 
 @pytest.mark.parametrize('device_id', list(range(torch.cuda.device_count())))
 @pytest.mark.parametrize('scale', [1.0, 2.0, 3.0, 4.0])
-@pytest.mark.parametrize('B, H, T, D, P_SEQ', [
-    (2, 4, 512, 128, 100),
-    (2, 4, 1024, 64, 10), 
-    (2, 4, 2048, 32, 0),
-    (2, 4, 4096, 16, 0),
-    (1, 2, 8192, 16, 0),
-    (1, 2, 8192, 32, 0),
+@pytest.mark.parametrize('B, H, M, N, D', [
+    (2, 4, 512, 612, 128),
+    (2, 4, 1024, 1034, 64), 
+    (2, 4, 2048, 2048, 32),
+    (2, 4, 4096, 4096, 16),
+    (2, 4, 4096, 4001, 16),
+    (1, 2, 8192, 8192, 16),
+    (1, 2, 8192, 8192, 32),
 ])
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('stride_order', ['BHTD', 'BTHD'])
 @pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
-def test_attention_bwd(B, H, T, D, P_SEQ, causal, stride_order, dtype, scale, device_id):
+def test_attention_bwd(B, H, M, N, D, causal, stride_order, dtype, scale, device_id):
     device = f"cuda:{device_id}"
     if stride_order == "BHTD":
-        q1 = torch.empty((B, H, T, D), dtype=dtype, device=device).normal_(mean=0., std=scale).requires_grad_()
-        q2 = torch.empty((B, H, T, D), dtype=dtype, device=device).normal_(mean=0., std=scale).requires_grad_()
-        k1 = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device=device).normal_(mean=0., std=scale).requires_grad_()
-        k2 = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device=device).normal_(mean=0., std=scale).requires_grad_()
-        v = torch.empty((B, H, T + P_SEQ, D), dtype=dtype, device=device).normal_(mean=0., std=scale).requires_grad_()
-        do = torch.empty((B, H, T, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
+        q1 = torch.empty((B, H, M, D), dtype=dtype, device=device).normal_(mean=0., std=scale).requires_grad_()
+        q2 = torch.empty((B, H, M, D), dtype=dtype, device=device).normal_(mean=0., std=scale).requires_grad_()
+        k1 = torch.empty((B, H, N, D), dtype=dtype, device=device).normal_(mean=0., std=scale).requires_grad_()
+        k2 = torch.empty((B, H, N, D), dtype=dtype, device=device).normal_(mean=0., std=scale).requires_grad_()
+        v = torch.empty((B, H, N, D), dtype=dtype, device=device).normal_(mean=0., std=scale).requires_grad_()
+        do = torch.empty((B, H, M, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
     else:
-        q1 = torch.empty((B, T, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2).requires_grad_()
-        q2 = torch.empty((B, T, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2).requires_grad_()
-        k1 = torch.empty((B, T + P_SEQ, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2).requires_grad_()
-        k2 = torch.empty((B, T + P_SEQ, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2).requires_grad_()
-        v = torch.empty((B, T + P_SEQ, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2).requires_grad_()
-        do = torch.empty((B, T, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
+        q1 = torch.empty((B, M, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2).requires_grad_()
+        q2 = torch.empty((B, M, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2).requires_grad_()
+        k1 = torch.empty((B, N, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2).requires_grad_()
+        k2 = torch.empty((B, N, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2).requires_grad_()
+        v = torch.empty((B, N, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2).requires_grad_()
+        do = torch.empty((B, M, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
     
-    w = T // 2
+    w = M // 2
 
     o_ref = flag_attn.testing.piecewise_attention(q1, k1, q2, k2, v, w, causal=causal, upcast=True)
     dq1_ref, dk1_ref, dq2_ref, dk2_ref, dv_ref = torch.autograd.grad(o_ref, (q1, k1, q2, k2, v), do)
