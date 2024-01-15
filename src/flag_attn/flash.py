@@ -16,7 +16,7 @@ class FlashAttention(torch.autograd.Function):
 
         B, H, M, D = q.shape
         N = k.shape[2]
-        P_SEQ = N - M
+        P_SEQ = N - M if N > M else 0
 
         if sm_scale is None:
             sm_scale = 1. / math.sqrt(D)
@@ -40,7 +40,7 @@ class FlashAttention(torch.autograd.Function):
                 k.stride(0), k.stride(1), k.stride(2), k.stride(3),
                 v.stride(0), v.stride(1), v.stride(2), v.stride(3),
                 o.stride(0), o.stride(1), o.stride(2), o.stride(3),
-                B, H, M, P_SEQ,
+                B, H, M, N, P_SEQ,
                 BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_DMODEL=D, IS_CAUSAL=causal,
                 DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n, 
                 num_warps=num_warps, num_stages=num_stages,
@@ -53,7 +53,7 @@ class FlashAttention(torch.autograd.Function):
                     q, k, L, tot_attn, sm_scale, 
                     q.stride(0), q.stride(1), q.stride(2), q.stride(3),
                     k.stride(0), k.stride(1), k.stride(2), k.stride(3),
-                    B, H, M, P_SEQ,
+                    B, H, M, N, P_SEQ,
                     BLOCK_M=BLOCK_M, BLOCK_DMODEL=D, BLOCK_N=BLOCK_N, 
                     CAUSAL=causal,
                     DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
@@ -84,7 +84,7 @@ class FlashAttention(torch.autograd.Function):
 
         B, H, M, D = q.shape
         N = k.shape[2]
-        P_SEQ = N - M
+        P_SEQ = N - M if N > M else 0
 
         if sm_scale is None:
             sm_scale = 1. / math.sqrt(D)
@@ -124,7 +124,7 @@ class FlashAttention(torch.autograd.Function):
                 do.stride(0), do.stride(1), do.stride(2), do.stride(3),
                 dk.stride(0), dk.stride(1), dk.stride(2), dk.stride(3),
                 dv.stride(0), dv.stride(1), dv.stride(2), dv.stride(3),
-                q.shape[0], q.shape[1], q.shape[2], P_SEQ, 
+                B, H, M, N, P_SEQ,
                 BLOCK_M=BLOCK_M, BLOCK_DMODEL=D, BLOCK_N=BLOCK_N, CAUSAL=causal,
                 DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
                 num_stages=num_stages, num_warps=num_warps,
@@ -141,7 +141,7 @@ class FlashAttention(torch.autograd.Function):
                 v.stride(0), v.stride(1), v.stride(2), v.stride(3),
                 do.stride(0), do.stride(1), do.stride(2), do.stride(3),
                 dq.stride(0), dq.stride(1), dq.stride(2), dq.stride(3),
-                q.shape[0], q.shape[1], q.shape[2], P_SEQ, 
+                B, H, M, N, P_SEQ,
                 BLOCK_M=BLOCK_M, BLOCK_DMODEL=D, BLOCK_N=BLOCK_N, CAUSAL=causal,
                 DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
                 num_stages=num_stages, num_warps = num_warps,
@@ -220,7 +220,7 @@ def _fwd_kernel(
     stride_kz, stride_kh, stride_kn, stride_kk,
     stride_vz, stride_vh, stride_vn, stride_vk,
     stride_oz, stride_oh, stride_om, stride_ok,
-    Z, H, N_CTX, P_SEQ,
+    Z, H, M, N, P_SEQ,
     BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr, 
     IS_CAUSAL: tl.constexpr,
     DIVISIBLE_M: tl.constexpr, DIVISIBLE_N: tl.constexpr,
@@ -242,7 +242,7 @@ def _fwd_kernel(
     K += off_z * stride_kz + off_h * stride_kh
     V += off_z * stride_vz + off_h * stride_vh
     O += off_z * stride_oz + off_h * stride_oh
-    L += (off_z * H + off_h) * N_CTX # l's shape is (B, H, N_CTX)
+    L += (off_z * H + off_h) * M # l's shape is (B, H, M)
 
     offs_m_base = tl.arange(0, BLOCK_M)
     offs_m = start_m * BLOCK_M + offs_m_base
@@ -263,7 +263,7 @@ def _fwd_kernel(
     if DIVISIBLE_M:
         q = tl.load(q_ptrs, cache_modifier=".cg")
     else:
-        mask_m = offs_m < N_CTX
+        mask_m = offs_m < M
         q = tl.load(q_ptrs, mask=mask_m[:, None], cache_modifier=".cg")
     
     #Dot I trick: to place q in registers, it saves shared memory
@@ -283,14 +283,14 @@ def _fwd_kernel(
     # According to the rule of causal masking, then max index in n-dimension that this block may access
     # is `P_SEQ + (start_m + 1) * BLOCK_M`. 
     # However, the upper bound of index in n-dimension should never exceed the sequence length of k/v(`P_SEQ + N_CTX`). 
-    # `P_SEQ + (start_m + 1) * BLOCK_M` may be larger than `P_SEQ + N_CTX`.
+    # `P_SEQ + (start_m + 1) * BLOCK_M` may be larger than `N`.
     # At this case, there would be illegal memory access when loading k & v tiles 
     # if mask_n is not applied for loading(only when `DIVISIBLE_N`` is true).
     # See also https://github.com/FlagOpen/FlagAttention/pull/8
     if IS_CAUSAL:
-        hi = tl.minimum(N_CTX + P_SEQ, P_SEQ + (start_m + 1) * BLOCK_M)
+        hi = tl.minimum(N, P_SEQ + (start_m + 1) * BLOCK_M)
     else:
-        hi = N_CTX + P_SEQ
+        hi = N
 
     # loop over k, v and update accumulators
     offs_n_init = offs_n_base
@@ -305,7 +305,7 @@ def _fwd_kernel(
             k = tl.load(k_ptrs, cache_modifier=".cg")
             v = tl.load(v_ptrs, cache_modifier=".cg")
         else:
-            mask_n = offs_n < (N_CTX + P_SEQ)
+            mask_n = offs_n < N
             k = tl.load(k_ptrs, mask=mask_n[None, :], cache_modifier=".cg")
             v = tl.load(v_ptrs, mask=mask_n[:, None], cache_modifier=".cg")
 
@@ -431,7 +431,7 @@ def _bwd_kv_kernel(
     stride_doz, stride_doh, stride_dom, stride_dok,
     stride_dkz, stride_dkh, stride_dkn, stride_dkk,
     stride_dvz, stride_dvh, stride_dvn, stride_dvk,
-    Z, H, N_CTX, P_SEQ, 
+    Z, H, M, N, P_SEQ,
     BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr,
     CAUSAL: tl.constexpr,
     DIVISIBLE_M: tl.constexpr, DIVISIBLE_N: tl.constexpr,
@@ -455,8 +455,8 @@ def _bwd_kv_kernel(
     DV += off_z * stride_dvz + off_h * stride_dvh
 
     # offset pointers for batch/head
-    D += (off_z * H + off_h) * N_CTX
-    L += (off_z * H + off_h) * N_CTX
+    D += (off_z * H + off_h) * M
+    L += (off_z * H + off_h) * M
 
     if CAUSAL:
         lo = tl.maximum(start_n * BLOCK_N - P_SEQ, 0)
@@ -483,7 +483,7 @@ def _bwd_kv_kernel(
         v = tl.load(v_ptrs)
         k = tl.load(k_ptrs)
     else:
-        mask_n = offs_n < (N_CTX + P_SEQ)
+        mask_n = offs_n < N
         v = tl.load(v_ptrs, mask=mask_n[:, None])
         k = tl.load(k_ptrs, mask=mask_n[:, None])
 
@@ -492,7 +492,7 @@ def _bwd_kv_kernel(
     dv = tl.zeros([BLOCK_N, BLOCK_DMODEL], dtype=tl.float32)
     
     # loop over a col
-    for start_m in range(lo, N_CTX, BLOCK_M):
+    for start_m in range(lo, M, BLOCK_M):
         start_m = tl.multiple_of(start_m, BLOCK_M)
         offs_m = start_m + offs_m_base
         causal_mask = (P_SEQ + offs_m[:, None]) >= (offs_n[None, :]) # (BLOCK_M, BLOCK_N)
@@ -501,7 +501,7 @@ def _bwd_kv_kernel(
         if DIVISIBLE_M:
             q = tl.load(q_ptrs)
         else:
-            mask_m = offs_m < N_CTX
+            mask_m = offs_m < M
             valid_mask = mask_m[:, None] # & mask_n
             q = tl.load(q_ptrs, mask=mask_m[:, None])
         # recompute p = softmax(qk * sm_scale, dim=-1)
@@ -577,7 +577,7 @@ def _bwd_q_kernel(
     stride_vz, stride_vh, stride_vn, stride_vk,
     stride_doz, stride_doh, stride_dom, stride_dok,
     stride_dqz, stride_dqh, stride_dqm, stride_dqk,
-    Z, H, N_CTX, P_SEQ, 
+    Z, H, M, N, P_SEQ,
     BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr,
     CAUSAL: tl.constexpr, 
     DIVISIBLE_M: tl.constexpr, DIVISIBLE_N: tl.constexpr,
@@ -599,8 +599,8 @@ def _bwd_q_kernel(
     K += off_z * stride_kz + off_h * stride_kh
     V += off_z * stride_vz + off_h * stride_vh
     DO += off_z * stride_doz + off_h * stride_doh
-    D += (off_z * H + off_h) * N_CTX
-    L += (off_z * H + off_h) * N_CTX
+    D += (off_z * H + off_h) * M
+    L += (off_z * H + off_h) * M
 
     # offset pointers for batch/head
     DQ += off_z * stride_dqz + off_h * stride_dqh
@@ -629,7 +629,7 @@ def _bwd_q_kernel(
         delta = tl.load(d_ptrs)
         l = tl.load(l_ptrs)
     else:
-        mask_m = offs_m < N_CTX
+        mask_m = offs_m < M
         q = tl.load(q_ptrs, mask=mask_m[:, None])
         do = tl.load(do_ptrs, mask=mask_m[:, None])
         delta = tl.load(d_ptrs, mask=mask_m)
@@ -641,9 +641,9 @@ def _bwd_q_kernel(
     # loop over k, v and update accumulator
     # see note "Loop-Bound-For-N"
     if CAUSAL:
-        hi = tl.minimum(N_CTX + P_SEQ, P_SEQ + (start_m + 1) * BLOCK_M)
+        hi = tl.minimum(N, P_SEQ + (start_m + 1) * BLOCK_M)
     else:
-        hi = N_CTX + P_SEQ
+        hi = N
 
     # loop over a row
     for start_n in range(0, hi, BLOCK_N):
@@ -654,7 +654,7 @@ def _bwd_q_kernel(
             v = tl.load(v_ptrs)
             k = tl.load(k_ptrs)
         else:
-            mask_n = offs_n < (N_CTX + P_SEQ)
+            mask_n = offs_n < N
             v = tl.load(v_ptrs, mask=mask_n[:, None])
             k = tl.load(k_ptrs, mask=mask_n[:, None])
 

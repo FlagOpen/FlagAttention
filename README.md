@@ -213,7 +213,8 @@ The performance of piecewise_attention has improved compared to that in v0.1. In
 - datatype support, `float16` and `bfloat16` for Ampere Nvidia GPUs;
 - support causal and non-causal modes;
 - support forward & backward modes;
-- the sequence length of k/v can be larger than that of q.
+- the sequence length of k/v can be different from that of q;
+- support computation of total attention of each `k` gets from all `q`'s.
 
 #### Limitations
 
