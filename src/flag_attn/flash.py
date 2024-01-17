@@ -16,7 +16,8 @@ class FlashAttention(torch.autograd.Function):
 
         B, H, M, D = q.shape
         N = k.shape[2]
-        P_SEQ = N - M if N > M else 0
+        P_SEQ = N - M
+        larger_m = M > N
 
         if sm_scale is None:
             sm_scale = 1. / math.sqrt(D)
@@ -41,7 +42,8 @@ class FlashAttention(torch.autograd.Function):
                 v.stride(0), v.stride(1), v.stride(2), v.stride(3),
                 o.stride(0), o.stride(1), o.stride(2), o.stride(3),
                 B, H, M, N, P_SEQ,
-                BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_DMODEL=D, IS_CAUSAL=causal,
+                BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_DMODEL=D, 
+                IS_CAUSAL=causal, LARGER_M=larger_m,
                 DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n, 
                 num_warps=num_warps, num_stages=num_stages,
             )
@@ -84,7 +86,8 @@ class FlashAttention(torch.autograd.Function):
 
         B, H, M, D = q.shape
         N = k.shape[2]
-        P_SEQ = N - M if N > M else 0
+        P_SEQ = N - M
+        larger_m = M > N
 
         if sm_scale is None:
             sm_scale = 1. / math.sqrt(D)
@@ -142,7 +145,8 @@ class FlashAttention(torch.autograd.Function):
                 do.stride(0), do.stride(1), do.stride(2), do.stride(3),
                 dq.stride(0), dq.stride(1), dq.stride(2), dq.stride(3),
                 B, H, M, N, P_SEQ,
-                BLOCK_M=BLOCK_M, BLOCK_DMODEL=D, BLOCK_N=BLOCK_N, CAUSAL=causal,
+                BLOCK_M=BLOCK_M, BLOCK_DMODEL=D, BLOCK_N=BLOCK_N, 
+                CAUSAL=causal, LARGER_M=larger_m,
                 DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
                 num_stages=num_stages, num_warps = num_warps,
             )
@@ -222,7 +226,7 @@ def _fwd_kernel(
     stride_oz, stride_oh, stride_om, stride_ok,
     Z, H, M, N, P_SEQ,
     BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr, 
-    IS_CAUSAL: tl.constexpr,
+    IS_CAUSAL: tl.constexpr, LARGER_M: tl.constexpr,
     DIVISIBLE_M: tl.constexpr, DIVISIBLE_N: tl.constexpr,
 ):
     input_dtype = Q.dtype.element_ty
@@ -289,6 +293,8 @@ def _fwd_kernel(
     # See also https://github.com/FlagOpen/FlagAttention/pull/8
     if IS_CAUSAL:
         hi = tl.minimum(N, P_SEQ + (start_m + 1) * BLOCK_M)
+        if LARGER_M:
+            hi = tl.maximum(0, hi)
     else:
         hi = N
 
@@ -336,8 +342,14 @@ def _fwd_kernel(
         v_ptrs += BLOCK_N * stride_vn
 
     # write back l & o
-    acc = acc * (1.0 / l_i[:, None])
-    l = m_i * sm_scale + tl.log(l_i) # log(normalizer)
+    if IS_CAUSAL and LARGER_M:
+        is_empty_line = (offs_m + P_SEQ) < 0
+        acc = tl.where(is_empty_line[:, None], 0.0, acc * (1.0 / l_i[:, None]))
+        l = tl.where(is_empty_line, float("-inf"), m_i * sm_scale + tl.log(l_i))
+    else:
+        acc = acc * (1.0 / l_i[:, None])
+        l = m_i * sm_scale + tl.log(l_i) # log(normalizer)
+    
     if DIVISIBLE_M:
         tl.store(l_ptrs, l, cache_modifier=".cg")
         tl.store(o_ptrs, acc.to(input_dtype), cache_modifier=".cg")
@@ -579,7 +591,7 @@ def _bwd_q_kernel(
     stride_dqz, stride_dqh, stride_dqm, stride_dqk,
     Z, H, M, N, P_SEQ,
     BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr,
-    CAUSAL: tl.constexpr, 
+    CAUSAL: tl.constexpr, LARGER_M: tl.constexpr,
     DIVISIBLE_M: tl.constexpr, DIVISIBLE_N: tl.constexpr,
 ):
     input_dtype = Q.dtype.element_ty
@@ -642,6 +654,8 @@ def _bwd_q_kernel(
     # see note "Loop-Bound-For-N"
     if CAUSAL:
         hi = tl.minimum(N, P_SEQ + (start_m + 1) * BLOCK_M)
+        if LARGER_M:
+            hi = tl.maximum(0, hi)
     else:
         hi = N
 

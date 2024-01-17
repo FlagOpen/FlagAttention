@@ -14,7 +14,7 @@ def total_attention(q, k, l, causal=False, sm_scale=None):
 
     B, H, M, D = q.shape
     N = k.shape[2]
-    P_SEQ = N - M if N > M else 0
+    P_SEQ = N - M
 
     if sm_scale is None:
         sm_scale = 1. / math.sqrt(D)

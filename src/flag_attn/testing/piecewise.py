@@ -12,7 +12,7 @@ def attention(q1, k1, q2, k2, v, dist_threshold, causal, sm_scale=None, upcast=F
         sm_scale = 1. / math.sqrt(D)
     kv_seq_len = k1.shape[-2]
     q_seq_len = q1.shape[-2]
-    p_seq = kv_seq_len - q_seq_len if kv_seq_len > q_seq_len else 0
+    p_seq = kv_seq_len - q_seq_len
     device = q1.device
 
     ms = torch.arange(q_seq_len, device=device).unsqueeze(-1)
@@ -28,6 +28,8 @@ def attention(q1, k1, q2, k2, v, dist_threshold, causal, sm_scale=None, upcast=F
 
     # upcast attention to fp32
     P = torch.softmax(S, dim=-1, dtype=torch.float32).to(v.dtype)
+    if causal:
+        P = torch.where(ms + p_seq >= ns, P, 0.0)
     attn_output = torch.matmul(P, v)
     return attn_output.to(input_dtype)
 

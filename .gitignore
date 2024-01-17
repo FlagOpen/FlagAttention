@@ -1,5 +1,6 @@
 # results of benchmark
 benchmark/results*/
+playground/
 
 # version, since setuptools-scm is used, this file is automatic generated when building the package
 src/flag_attn/_version.py

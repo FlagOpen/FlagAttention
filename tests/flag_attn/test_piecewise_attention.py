@@ -19,6 +19,7 @@ def max_diff(a, b):
     (2, 4, 4096, 4001, 16),
     (1, 2, 8192, 8192, 16),
     (1, 2, 8192, 8192, 32),
+    (1, 2, 8192, 3867, 32),
 ])
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('stride_order', ['BHTD', 'BTHD'])
@@ -37,7 +38,7 @@ def test_attention_fwd(B, H, M, N, D, causal, stride_order, dtype, scale, device
         k1 = torch.empty((B, N, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
         k2 = torch.empty((B, N, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
         v = torch.empty((B, N, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
-    w = 780
+    w = (M // 2) if M < N else (M - N // 2)
 
     o_ref = flag_attn.testing.piecewise_attention(q1, k1, q2, k2, v, w, causal=causal, upcast=True)
     o_torch = flag_attn.testing.piecewise_attention(q1, k1, q2, k2, v, w, causal=causal)
@@ -61,6 +62,7 @@ def test_attention_fwd(B, H, M, N, D, causal, stride_order, dtype, scale, device
     (2, 4, 4096, 4001, 16),
     (1, 2, 8192, 8192, 16),
     (1, 2, 8192, 8192, 32),
+    (1, 2, 8192, 3867, 32),
 ])
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('stride_order', ['BHTD', 'BTHD'])
@@ -82,7 +84,7 @@ def test_attention_bwd(B, H, M, N, D, causal, stride_order, dtype, scale, device
         v = torch.empty((B, N, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2).requires_grad_()
         do = torch.empty((B, M, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
     
-    w = M // 2
+    w = (M // 2) if M < N else (M - N // 2)
 
     o_ref = flag_attn.testing.piecewise_attention(q1, k1, q2, k2, v, w, causal=causal, upcast=True)
     dq1_ref, dk1_ref, dq2_ref, dk2_ref, dv_ref = torch.autograd.grad(o_ref, (q1, k1, q2, k2, v), do)

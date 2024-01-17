@@ -67,6 +67,7 @@ def test_attention_fwd(B, H, M, N, D, causal, stride_order, dtype, scale, device
     (2, 4, 4096, 4001, 128),
     (1, 2, 8192, 8202, 16),
     (1, 2, 8192, 8192, 32),
+    (2, 4, 10006, 10, 128),
 ])
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])

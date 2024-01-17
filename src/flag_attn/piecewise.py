@@ -32,7 +32,9 @@ class PiecewiseAttention(torch.autograd.Function):
 
         B, H, M, D = q1.shape
         N = k1.shape[2]
-        P_SEQ = N - M if N > M else 0
+        P_SEQ = N - M
+        larger_m = M > N
+
         if sm_scale is None:
             sm_scale = 1. / math.sqrt(D)
         
@@ -61,7 +63,7 @@ class PiecewiseAttention(torch.autograd.Function):
                 o.stride(0), o.stride(1), o.stride(2), o.stride(3),
                 B, H, M, N, P_SEQ,
                 w = w, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_DMODEL=D,
-                IS_CAUSAL=causal,
+                IS_CAUSAL=causal, LARGER_M=larger_m,
                 DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
                 num_warps=num_warps, num_stages=num_stages,
             )
@@ -81,7 +83,8 @@ class PiecewiseAttention(torch.autograd.Function):
 
         B, H, M, D = q1.shape
         N = k1.shape[2]
-        P_SEQ = N - M if N > M else 0
+        P_SEQ = N - M
+        larger_m = M > N
 
         if sm_scale is None:
             sm_scale = 1. / math.sqrt(D)
@@ -154,7 +157,7 @@ class PiecewiseAttention(torch.autograd.Function):
                 w=w,
                 BLOCK_M=BLOCK_M, BLOCK_DMODEL=D,
                 BLOCK_N=BLOCK_N,
-                CAUSAL=causal,
+                CAUSAL=causal, LARGER_M=larger_m,
                 DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
                 num_stages=num_stages,
                 num_warps=num_warps,
@@ -232,7 +235,7 @@ def _fwd_kernel(
     w: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    IS_CAUSAL: tl.constexpr,
+    IS_CAUSAL: tl.constexpr, LARGER_M: tl.constexpr,
     DIVISIBLE_M: tl.constexpr, DIVISIBLE_N: tl.constexpr,
 ):
     input_dtype = Q1.dtype.element_ty
@@ -296,6 +299,8 @@ def _fwd_kernel(
     # see note "Loop-Bound-For-N"
     if IS_CAUSAL:
         hi = tl.minimum(N, P_SEQ + (start_m + 1) * BLOCK_M)
+        if LARGER_M:
+            hi = tl.maximum(0, hi)
     else:
         hi = N
     
@@ -348,9 +353,15 @@ def _fwd_kernel(
         k2_ptrs += BLOCK_N * stride_k2n
         v_ptrs += BLOCK_N * stride_vn
 
-    # write back l
-    acc = acc * (1.0 / l_i[:, None])
-    l_i = m_i * sm_scale + tl.log(l_i)
+    # write back l & o
+    if IS_CAUSAL and LARGER_M:
+        is_empty_line = (offs_m + P_SEQ) < 0
+        acc = tl.where(is_empty_line[:, None], 0.0, acc * (1.0 / l_i[:, None]))
+        l_i = tl.where(is_empty_line, float("-inf"), m_i * sm_scale + tl.log(l_i))
+    else:
+        acc = acc * (1.0 / l_i[:, None])
+        l_i = m_i * sm_scale + tl.log(l_i)
+
     if DIVISIBLE_M:
         tl.store(l_ptrs, l_i)
         tl.store(o_ptrs, acc.to(input_dtype))
@@ -634,7 +645,7 @@ def _bwd_q_kernel(
     w: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    CAUSAL: tl.constexpr,
+    CAUSAL: tl.constexpr, LARGER_M: tl.constexpr,
     DIVISIBLE_M: tl.constexpr, DIVISIBLE_N: tl.constexpr,
 ):
     input_dtype = Q1.dtype.element_ty
@@ -706,6 +717,8 @@ def _bwd_q_kernel(
     # see note "Loop-Bound-For-N"
     if CAUSAL:
         hi = tl.minimum(N, P_SEQ + (start_m + 1) * BLOCK_M)
+        if LARGER_M:
+            hi = tl.maximum(0, hi)
     else:
         hi = N
 
