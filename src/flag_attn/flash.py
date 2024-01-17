@@ -95,7 +95,7 @@ class FlashAttention(torch.autograd.Function):
         # to work around https://github.com/openai/triton/issues/2441
         device = torch.cuda.device_of(q)
         with torch.cuda.device(device):
-            config = get_fwd_config(B, H, M, N, D, causal)
+            config = get_bwd_config(B, H, M, N, D, causal)
             BLOCK_M, BLOCK_N, num_stages, num_warps = config
 
             divisible_m = M % BLOCK_M == 0

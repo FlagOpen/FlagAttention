@@ -384,10 +384,10 @@ def get_bwd_config(B, H, M, N, D, causal):
             else:
                 BLOCK_M, BLOCK_N, num_stages, num_warps = 32, 64, 2, 4
         
-        BLOCK_M = 64 if D<=64 else 128
-        BLOCK_N = 64
-        num_stages = 1 if D<=64 else (2 if not causal else 1)
-        num_warps = 4 if D <=64 else 8
+        # BLOCK_M = 64 if D<=64 else 128
+        # BLOCK_N = 64
+        # num_stages = 1 if D<=64 else (2 if not causal else 1)
+        # num_warps = 4 if D <=64 else 8
     # RTX-3090, ...
     elif torch.cuda.get_device_capability() == (8, 6):
         if not causal:
