@@ -48,7 +48,7 @@ def _total_attention_kernel(
     Q, K, L, TA, sm_scale, 
     stride_qz, stride_qh, stride_qm, stride_qk,
     stride_kz, stride_kh, stride_kn, stride_kk,
-    Z, H, M, N,
+    Z, H, M, N, P_SEQ,
     BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr, 
     CAUSAL: tl.constexpr, 
     DIVISIBLE_M: tl.constexpr, DIVISIBLE_N: tl.constexpr,
@@ -67,7 +67,6 @@ def _total_attention_kernel(
     L += (off_z * H + off_h) * M
     TA += (off_z * H + off_h) * N # (b, h, n)
 
-    P_SEQ = N - M
     if CAUSAL:
         lo = tl.maximum(start_n * BLOCK_N - P_SEQ, 0)
         lo = (lo // BLOCK_M) * BLOCK_M
