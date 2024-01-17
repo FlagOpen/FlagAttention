@@ -21,7 +21,7 @@ def attention(q,
         sm_scale = 1. / math.sqrt(D)
     kv_seq_len = k.shape[-2]
     q_seq_len = q.shape[-2]
-    p_seq = kv_seq_len - q_seq_len # if kv_seq_len > q_seq_len else 0
+    p_seq = kv_seq_len - q_seq_len
     device = q.device
 
     ms = torch.arange(q_seq_len, device=device).unsqueeze(-1)
