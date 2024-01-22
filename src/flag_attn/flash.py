@@ -3,6 +3,8 @@ import torch
 import triton
 import triton.language as tl
 from flag_attn.total import _total_attention_kernel
+from flag_attn.split_kv import _fwd_split_kv_kernel, _fwd_combine_kv_splits, num_splits_herustic
+from flag_attn.split_kv import get_fwd_config as get_fwd_config_kv_split
 
 __all__ = ["attention"]
 
@@ -24,30 +26,76 @@ class FlashAttention(torch.autograd.Function):
 
         # to work around https://github.com/openai/triton/issues/2441
         device = torch.cuda.device_of(q)
+
         with torch.cuda.device(device):
-            config = get_fwd_config(B, H, M, N, D, causal)
-            BLOCK_M, BLOCK_N, num_stages, num_warps = config
+            config_for_split_kv = get_fwd_config_kv_split(B, H, M, N, D, causal)
+            S = num_splits_herustic(B, H, M, N, D, causal, config_for_split_kv, 128)
+            split_kv: bool = S > 1
 
-            divisible_m = M % BLOCK_M == 0
-            divisible_n = N % BLOCK_N == 0
-            # consider using 3d grid to avoid div & rem
-            grid = (triton.cdiv(M, BLOCK_M), H, B)
-            o = torch.empty_like(q)
-            L = torch.empty((B, H, M), device=q.device, dtype=torch.float32)
-            _fwd_kernel[grid](
-                q, k, v, sm_scale,
-                L, o,
-                q.stride(0), q.stride(1), q.stride(2), q.stride(3),
-                k.stride(0), k.stride(1), k.stride(2), k.stride(3),
-                v.stride(0), v.stride(1), v.stride(2), v.stride(3),
-                o.stride(0), o.stride(1), o.stride(2), o.stride(3),
-                B, H, M, N, P_SEQ,
-                BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_DMODEL=D,
-                IS_CAUSAL=causal, LARGER_M=larger_m,
-                DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
-                num_warps=num_warps, num_stages=num_stages,
-            )
+            if not split_kv:
+                config = get_fwd_config(B, H, M, N, D, causal)
+                BLOCK_M, BLOCK_N, num_stages, num_warps = config
 
+                divisible_m = M % BLOCK_M == 0
+                divisible_n = N % BLOCK_N == 0
+                # consider using 3d grid to avoid div & rem
+                grid = (triton.cdiv(M, BLOCK_M), H, B)
+                o = torch.empty_like(q)
+                L = torch.empty((B, H, M), device=q.device, dtype=torch.float32)
+                _fwd_kernel[grid](
+                    q, k, v, sm_scale,
+                    L, o,
+                    q.stride(0), q.stride(1), q.stride(2), q.stride(3),
+                    k.stride(0), k.stride(1), k.stride(2), k.stride(3),
+                    v.stride(0), v.stride(1), v.stride(2), v.stride(3),
+                    o.stride(0), o.stride(1), o.stride(2), o.stride(3),
+                    B, H, M, N, P_SEQ,
+                    BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_DMODEL=D,
+                    IS_CAUSAL=causal, LARGER_M=larger_m,
+                    DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
+                    num_warps=num_warps, num_stages=num_stages,
+                )
+            else: # split kv
+                BLOCK_M, BLOCK_N, num_stages, num_warps = config_for_split_kv
+
+
+                divisible_m = M % BLOCK_M == 0
+                divisible_n = N % BLOCK_N == 0
+
+                # consider using 3d grid to avoid div & rem
+                multiple_l = torch.empty((B, H, S, M), dtype=torch.float32, device="cuda")
+                multiple_o = torch.empty((B, H, S, M, D), dtype=torch.float16, device="cuda")
+                grid = (triton.cdiv(M, BLOCK_M), S, H * B)
+                N_SPLIT_SIZE = triton.cdiv(triton.cdiv(N, BLOCK_N), S) * BLOCK_N
+                _fwd_split_kv_kernel[grid](
+                    q, k, v, sm_scale,
+                    multiple_l, multiple_o,
+                    q.stride(0), q.stride(1), q.stride(2), q.stride(3),
+                    k.stride(0), k.stride(1), k.stride(2), k.stride(3),
+                    v.stride(0), v.stride(1), v.stride(2), v.stride(3),
+                    multiple_o.stride(0), multiple_o.stride(1), multiple_o.stride(2), multiple_o.stride(3), multiple_o.stride(4),
+                    B, H, M, N, P_SEQ, N_SPLIT_SIZE, S,
+                    BLOCK_M=BLOCK_M, BLOCK_DMODEL=D, BLOCK_N=BLOCK_N,
+                    IS_CAUSAL=causal, LARGER_M=larger_m,
+                    DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
+                    num_stages=num_stages, num_warps=num_warps,
+                )
+
+                L = torch.empty((B, H, M), dtype=torch.float32, device="cuda")
+                o = torch.empty_like(q)
+                grid = (triton.cdiv(M, BLOCK_M), H, B)
+                _fwd_combine_kv_splits[grid](
+                    multiple_o, multiple_l,
+                    o, L,
+                    multiple_o.stride(0), multiple_o.stride(1), multiple_o.stride(2), multiple_o.stride(3), multiple_o.stride(4),
+                    o.stride(0), o.stride(1), o.stride(2), o.stride(3),
+                    B, H, M, S,
+                    BLOCK_M=BLOCK_M, BLOCK_DMODEL=D,
+                    DIVISIBLE_M=divisible_m,
+                    num_stages=num_stages, num_warps=num_warps,
+                )
+
+            # total attention
             if return_total_attention:
                 tot_attn = torch.empty((B, H, N), device=q.device, dtype=torch.float32)
                 grid = (triton.cdiv(N, BLOCK_N), H, B)
@@ -75,8 +123,7 @@ class FlashAttention(torch.autograd.Function):
                 tot_attn if return_total_attention else None
             )
             return outs
-        else:
-            return o
+        return o
 
     @staticmethod
     def backward(ctx, do, *ignored):
