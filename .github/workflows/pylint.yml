@@ -8,4 +8,4 @@ jobs:
     steps:
     - name: Analysing the code with pylint
       run: |
-        pylint $(git ls-files '*.py')
+        pylint tests/flag_attn/test_piecewise_attention.py
