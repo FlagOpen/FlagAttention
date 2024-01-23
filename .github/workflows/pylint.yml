@@ -8,4 +8,4 @@ jobs:
     steps:
     - name: Analysing the code with pylint
       run: |
-        pylint ./
+        pylint $(git ls-files '*.py')
