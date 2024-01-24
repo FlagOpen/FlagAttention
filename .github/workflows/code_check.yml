@@ -8,7 +8,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: |
-        bash tools/lint.sh
+          bash tools/lint.sh
       - run: |
-        bash tools/fmt.sh
+          bash tools/fmt.sh
 
