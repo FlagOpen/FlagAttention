@@ -1,9 +1,6 @@
 import math
 import torch
 
-import math
-import torch
-
 def attention(q,
               k,
               v,
@@ -47,8 +44,8 @@ def attention(q,
 
     has_extra_return = return_log_normalizer or return_total_attention
     if has_extra_return:
-        outs = (attn_output, 
-                 log_normalizer if return_log_normalizer else None, 
+        outs = (attn_output,
+                 log_normalizer if return_log_normalizer else None,
                  tot_attn if return_total_attention else None)
         return outs
     else:

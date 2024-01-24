@@ -14,7 +14,8 @@ classifiers = [
     "License :: OSI Approved :: Apache Software License",
 ]
 dependencies = [
-    "torch>=2.1.0",
+    "torch>=2.0.0",
+    "triton>=2.2.0"
 ]
 
 [project.optional-dependencies]
@@ -38,7 +39,7 @@ where = ["src"]
 include = ["flag_attn"]
 namespaces = false
 
-# helps for setting up pytest in pyprojects 
+# helps for setting up pytest in pyprojects
 # https://docs.pytest.org/en/7.3.x/reference/customize.html#rootdir
 # https://docs.pytest.org/en/7.3.x/reference/reference.html#confval-pythonpath
 [tool.pytest.ini_options]
@@ -50,3 +51,6 @@ pythonpath = [
     "tests/flag_attn",
 ]
 
+[tool.ruff]
+ignore = ["E741"]
+line-length = 120
