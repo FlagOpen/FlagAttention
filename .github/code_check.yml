@@ -1,0 +1,14 @@
+name: code-check
+run-name: ${{ github.actor }} is performing code-checking
+on: [pull_request]
+jobs:
+  code-check:
+    name: pylint
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+        bash tools/lint.sh
+      - run: |
+        bash tools/fmt.sh
+
