@@ -6,6 +6,8 @@ from flag_attn.total import _total_attention_kernel
 
 __all__ = ["attention"]
 
+# add some comment
+
 # --------------------------- public API ---------------------------
 class FlashAttention(torch.autograd.Function):
     @staticmethod
@@ -21,7 +23,7 @@ class FlashAttention(torch.autograd.Function):
 
         if sm_scale is None:
             sm_scale = 1. / math.sqrt(D)
-        
+
         # to work around https://github.com/openai/triton/issues/2441
         device = torch.cuda.device_of(q)
         with torch.cuda.device(device):
@@ -42,9 +44,9 @@ class FlashAttention(torch.autograd.Function):
                 v.stride(0), v.stride(1), v.stride(2), v.stride(3),
                 o.stride(0), o.stride(1), o.stride(2), o.stride(3),
                 B, H, M, N, P_SEQ,
-                BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_DMODEL=D, 
+                BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_DMODEL=D,
                 IS_CAUSAL=causal, LARGER_M=larger_m,
-                DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n, 
+                DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
                 num_warps=num_warps, num_stages=num_stages,
             )
 
@@ -52,11 +54,11 @@ class FlashAttention(torch.autograd.Function):
                 tot_attn = torch.empty((B, H, N), device=q.device, dtype=torch.float32)
                 grid = (triton.cdiv(N, BLOCK_N), H, B)
                 _total_attention_kernel[grid](
-                    q, k, L, tot_attn, sm_scale, 
+                    q, k, L, tot_attn, sm_scale,
                     q.stride(0), q.stride(1), q.stride(2), q.stride(3),
                     k.stride(0), k.stride(1), k.stride(2), k.stride(3),
                     B, H, M, N, P_SEQ,
-                    BLOCK_M=BLOCK_M, BLOCK_DMODEL=D, BLOCK_N=BLOCK_N, 
+                    BLOCK_M=BLOCK_M, BLOCK_DMODEL=D, BLOCK_N=BLOCK_N,
                     CAUSAL=causal,
                     DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
                     num_stages=num_stages, num_warps=num_warps,
@@ -91,7 +93,7 @@ class FlashAttention(torch.autograd.Function):
 
         if sm_scale is None:
             sm_scale = 1. / math.sqrt(D)
-        
+
         # to work around https://github.com/openai/triton/issues/2441
         device = torch.cuda.device_of(q)
         with torch.cuda.device(device):
@@ -118,7 +120,7 @@ class FlashAttention(torch.autograd.Function):
             dv = torch.empty_like(v)
             grid = (triton.cdiv(N, BLOCK_N), H, B)
             _bwd_kv_kernel[grid](
-                q, k, v, sm_scale, do, 
+                q, k, v, sm_scale, do,
                 dk, dv,
                 L, delta,
                 q.stride(0), q.stride(1), q.stride(2), q.stride(3),
@@ -136,7 +138,7 @@ class FlashAttention(torch.autograd.Function):
             dq = torch.zeros_like(q)
             grid = (triton.cdiv(M, BLOCK_M), H, B)
             _bwd_q_kernel[grid](
-                q, k, v, sm_scale, do, 
+                q, k, v, sm_scale, do,
                 dq,
                 L, delta,
                 q.stride(0), q.stride(1), q.stride(2), q.stride(3),
@@ -145,7 +147,7 @@ class FlashAttention(torch.autograd.Function):
                 do.stride(0), do.stride(1), do.stride(2), do.stride(3),
                 dq.stride(0), dq.stride(1), dq.stride(2), dq.stride(3),
                 B, H, M, N, P_SEQ,
-                BLOCK_M=BLOCK_M, BLOCK_DMODEL=D, BLOCK_N=BLOCK_N, 
+                BLOCK_M=BLOCK_M, BLOCK_DMODEL=D, BLOCK_N=BLOCK_N,
                 CAUSAL=causal, LARGER_M=larger_m,
                 DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
                 num_stages=num_stages, num_warps = num_warps,
@@ -154,7 +156,7 @@ class FlashAttention(torch.autograd.Function):
         return dq, dk, dv, None, None, None, None
 
 
-def attention(q, k, v, causal=False, sm_scale=None, 
+def attention(q, k, v, causal=False, sm_scale=None,
               return_log_normalizer=False, return_total_attention=False,
 ):
     """
@@ -183,7 +185,7 @@ def attention(q, k, v, causal=False, sm_scale=None,
 # --------------------------- Forward ---------------------------
 # NOTE: this function can be overwritten at runtime to use your custom config
 def get_fwd_config(B, H, M, N, D, causal):
-    if torch.cuda.get_device_capability() == (8, 0): 
+    if torch.cuda.get_device_capability() == (8, 0):
         if not causal:
             if D <= 64:
                 BLOCK_M, BLOCK_N, num_stages, num_warps = 128, 64, 3, 4
@@ -225,7 +227,7 @@ def _fwd_kernel(
     stride_vz, stride_vh, stride_vn, stride_vk,
     stride_oz, stride_oh, stride_om, stride_ok,
     Z, H, M, N, P_SEQ,
-    BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr, 
+    BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr,
     IS_CAUSAL: tl.constexpr, LARGER_M: tl.constexpr,
     DIVISIBLE_M: tl.constexpr, DIVISIBLE_N: tl.constexpr,
 ):
@@ -253,7 +255,7 @@ def _fwd_kernel(
     offs_n_base = tl.arange(0, BLOCK_N)
     offs_k = tl.arange(0, BLOCK_DMODEL)
 
-    # initialize pointers to value-like data 
+    # initialize pointers to value-like data
     q_ptrs = Q + (offs_m[:, None] * stride_qm + offs_k[None, :] * stride_qk) # (BLOCK_M, BLOCK_DMODEL)
     o_ptrs = O + (offs_m[:, None] * stride_om + offs_k[None, :] * stride_ok) # (BLOCK_M, BLOCK_DMODEL)
     l_ptrs = L + offs_m
@@ -269,7 +271,7 @@ def _fwd_kernel(
     else:
         mask_m = offs_m < M
         q = tl.load(q_ptrs, mask=mask_m[:, None], cache_modifier=".cg")
-    
+
     #Dot I trick: to place q in registers, it saves shared memory
     if BLOCK_DMODEL < 128:
         I = tl.where(offs_k[:, None] == offs_k,
@@ -285,10 +287,10 @@ def _fwd_kernel(
     # NOTE: Loop-Bound-For-N
     # The indices in m-dimension that this block may access is in `[start_m * BLOCK_M, (start_m + 1) * BLOCK_M)`.
     # According to the rule of causal masking, then max index in n-dimension that this block may access
-    # is `P_SEQ + (start_m + 1) * BLOCK_M`. 
-    # However, the upper bound of index in n-dimension should never exceed the sequence length of k/v(`P_SEQ + N_CTX`). 
+    # is `P_SEQ + (start_m + 1) * BLOCK_M`.
+    # However, the upper bound of index in n-dimension should never exceed the sequence length of k/v(`P_SEQ + N_CTX`).
     # `P_SEQ + (start_m + 1) * BLOCK_M` may be larger than `N`.
-    # At this case, there would be illegal memory access when loading k & v tiles 
+    # At this case, there would be illegal memory access when loading k & v tiles
     # if mask_n is not applied for loading(only when `DIVISIBLE_N`` is true).
     # See also https://github.com/FlagOpen/FlagAttention/pull/8
     if IS_CAUSAL:
@@ -305,7 +307,7 @@ def _fwd_kernel(
     for start_n in range(0, hi, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         offs_n = start_n + offs_n_base
-        
+
         # -- load k, v --
         if DIVISIBLE_N:
             k = tl.load(k_ptrs, cache_modifier=".cg")
@@ -318,7 +320,7 @@ def _fwd_kernel(
         # -- compute qk ---
         s = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         s += tl.dot(q, k)
-        
+
         if not DIVISIBLE_N:
             s = tl.where(mask_n[None, :], s, float("-inf"))
         if IS_CAUSAL:
@@ -349,7 +351,7 @@ def _fwd_kernel(
     else:
         acc = acc * (1.0 / l_i[:, None])
         l = m_i * sm_scale + tl.log(l_i) # log(normalizer)
-    
+
     if DIVISIBLE_M:
         tl.store(l_ptrs, l, cache_modifier=".cg")
         tl.store(o_ptrs, acc.to(input_dtype), cache_modifier=".cg")
@@ -406,7 +408,7 @@ def _bwd_preprocess(
     Delta += off_z * stride_dz + off_h * stride_dh
 
     # compute (Out * Dout).sum() for vector interpretation
-    off_m = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)        
+    off_m = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
     off_n = tl.arange(0, D_HEAD)
 
     # load
@@ -420,7 +422,7 @@ def _bwd_preprocess(
         mask_m = off_m < M
         o = tl.load(o_ptrs, mask=mask_m[:, None]).to(tl.float32)
         do = tl.load(do_ptrs, mask=mask_m[:, None]).to(tl.float32)
-    
+
     # compute
     delta = tl.sum(o * do, axis=1)
     # write-back
@@ -480,8 +482,8 @@ def _bwd_kv_kernel(
     offs_n = start_n * BLOCK_N + tl.arange(0, BLOCK_N)
     offs_m_base = tl.arange(0, BLOCK_M)
     offs_k = tl.arange(0, BLOCK_DMODEL)
-    
-    # initialize pointers to value-like data 
+
+    # initialize pointers to value-like data
     q_ptrs = Q + (offs_m_init[:, None] * stride_qm + offs_k[None, :] * stride_qk) # (BLOCK_M, BLOCK_DMODEL)
     k_ptrs = K + (offs_n[:, None] * stride_kn + offs_k[None, :] * stride_kk) # (BLOCK_N, BLOCK_DMODEL)
     v_ptrs = V + (offs_n[:, None] * stride_vn + offs_k[None, :] * stride_vk) # (BLOCK_N, BLOCK_DMODEL)
@@ -502,7 +504,7 @@ def _bwd_kv_kernel(
     # initialize dk amd dv
     dk = tl.zeros([BLOCK_N, BLOCK_DMODEL], dtype=tl.float32)
     dv = tl.zeros([BLOCK_N, BLOCK_DMODEL], dtype=tl.float32)
-    
+
     # loop over a col
     for start_m in range(lo, M, BLOCK_M):
         start_m = tl.multiple_of(start_m, BLOCK_M)
@@ -599,7 +601,7 @@ def _bwd_q_kernel(
     start_m = tl.program_id(0)
     off_h = tl.program_id(1)
     off_z = tl.program_id(2)
-    
+
     # scale sm_scale by log_2(e) and use
     # 2^x instead of exp in the loop because CSE and LICM
     # don't work as expected with `exp` in the loop
@@ -622,7 +624,7 @@ def _bwd_q_kernel(
     offs_n_init = offs_n_base
     offs_k = tl.arange(0, BLOCK_DMODEL)
 
-    # initialize pointers to value-like data 
+    # initialize pointers to value-like data
     q_ptrs = Q + (offs_m[:, None] * stride_qm + offs_k[None, :] * stride_qk) # (BLOCK_M, BLOCK_DMODEL)
     k_ptrs = K + (offs_n_init[:, None] * stride_kn + offs_k[None, :] * stride_kk) # (BLOCK_N, BLOCK_DMODEL)
     v_ptrs = V + (offs_n_init[:, None] * stride_vn + offs_k[None, :] * stride_vk) # (BLOCK_N, BLOCK_DMODEL)
@@ -647,7 +649,7 @@ def _bwd_q_kernel(
         delta = tl.load(d_ptrs, mask=mask_m)
         l = tl.load(l_ptrs, mask=mask_m)
 
-    # initialize dq 
+    # initialize dq
     dq = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
 
     # loop over k, v and update accumulator
@@ -662,7 +664,7 @@ def _bwd_q_kernel(
     # loop over a row
     for start_n in range(0, hi, BLOCK_N):
         offs_n = start_n + offs_n_base
-        
+
         # load k1, k2, v on chip
         if DIVISIBLE_N:
             v = tl.load(v_ptrs)
@@ -675,7 +677,7 @@ def _bwd_q_kernel(
 
         # recompute p = softmax(qk * sm_scale, dim=-1)
         if not DIVISIBLE_N:
-            valid_mask = mask_n # & mask_m[:, None] 
+            valid_mask = mask_n # & mask_m[:, None]
         if CAUSAL:
             causal_mask = (P_SEQ + offs_m[:, None]) >= (offs_n[None, :]) # (BLOCK_M, BLOCK_N)
         s = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
@@ -713,7 +715,7 @@ def _bwd_q_kernel(
         # increment pointers
         k_ptrs += BLOCK_N * stride_kn
         v_ptrs += BLOCK_N * stride_vn
-    
+
     dq *= sm_scale
     if DIVISIBLE_M:
         tl.store(dq_ptrs, dq.to(input_dtype))
