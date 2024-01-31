@@ -13,8 +13,12 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: Apache Software License",
 ]
+
+# Not specifing triton version here because torch has its own required triton version
+# FlagAttention needs a recent version of triton (triton nightly or 2.2.0) to run.
 dependencies = [
-    "torch>=2.1.0",
+    "torch>=2.0.0",
+    "triton"
 ]
 
 [project.optional-dependencies]
@@ -38,7 +42,7 @@ where = ["src"]
 include = ["flag_attn"]
 namespaces = false
 
-# helps for setting up pytest in pyprojects 
+# helps for setting up pytest in pyprojects
 # https://docs.pytest.org/en/7.3.x/reference/customize.html#rootdir
 # https://docs.pytest.org/en/7.3.x/reference/reference.html#confval-pythonpath
 [tool.pytest.ini_options]
@@ -50,3 +54,6 @@ pythonpath = [
     "tests/flag_attn",
 ]
 
+[tool.ruff]
+ignore = ["E741"]
+line-length = 120

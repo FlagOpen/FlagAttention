@@ -17,12 +17,12 @@ def attention(q1, k1, q2, k2, v, dist_threshold, causal, sm_scale=None, upcast=F
 
     ms = torch.arange(q_seq_len, device=device).unsqueeze(-1)
     ns = torch.arange(kv_seq_len, device=device)
-    
+
     S1 = torch.matmul(q1, k1.transpose(2, 3))
     S2 = torch.matmul(q2, k2.transpose(2, 3))
     long_distance = ((ms + p_seq - ns) >= dist_threshold)
     S = torch.where(long_distance, S2, S1) * sm_scale
-    
+
     if causal:
         S = torch.where(ms + p_seq >= ns, S, torch.finfo(S.dtype).min)
 
@@ -45,12 +45,12 @@ def attention_grad(q1, k1, q2, k2, v, w, causal, sm_scale, o, do, upcast=False):
 
     ms = torch.arange(q_seq_len, device=device).unsqueeze(-1)
     ns = torch.arange(kv_seq_len, device=device)
-    
+
     S1 = torch.matmul(q1, k1.transpose(2, 3))
     S2 = torch.matmul(q2, k2.transpose(2, 3))
     long_distance = ((ms + p_seq - ns) >= w)
     S = torch.where(long_distance, S2, S1) * sm_scale
-    
+
     if causal:
         S = torch.where((ms + p_seq) >= ns, S, torch.finfo(S.dtype).min)
 

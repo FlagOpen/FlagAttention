@@ -1,0 +1,41 @@
+files: '^src/.*'
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-ast
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: check-executables-have-shebangs
+      - id: check-shebang-scripts-are-executable
+      - id: detect-private-key
+      - id: debug-statements
+
+  # - repo: https://github.com/google/yapf
+  #   rev: v0.40.2
+  #   hooks:
+  #     - id: yapf
+  #       args: ["-p", "-i"]
+  #       stages: [commit, push, manual]
+
+  # - repo: https://github.com/pylint-dev/pylint
+  #   rev: v3.0.3
+  #   hooks:
+  #     - id: pylint
+
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.1.14
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+        stages: [commit, push, manual]
+      # - id: ruff-format
+      #   stages: [commit, push, manual]
+
+
+
