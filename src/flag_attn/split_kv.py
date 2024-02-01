@@ -3,6 +3,11 @@ import torch
 import triton
 import triton.language as tl
 
+"""
+This file implements flash decoding. flash attention with split_kv, which exposes another
+dimension of parallelism when batch_size * num_heads * blocks_along_seqlen_q cannot saturate
+the gpu's SM's.
+"""
 
 @triton.jit
 def _fwd_split_kv_kernel(
@@ -175,6 +180,7 @@ def _fwd_combine_kv_splits(
 
     # first loop to compute max of log normalizers
     l_max = tl.full([BLOCK_M], value=float("-inf"), dtype=tl.float32)
+    l_acc = tl.full([BLOCK_M], value=float("-inf"), dtype=tl.float32)
     l_ptrs = L + offs_m
     for i in range(0, S):
         if DIVISIBLE_M:
@@ -182,21 +188,23 @@ def _fwd_combine_kv_splits(
         else:
             l = tl.load(l_ptrs, mask=mask_m)
         l_max = tl.maximum(l_max, l)
+        l_acc = tl.log(tl.exp(l_acc - l_max) + tl.exp(l - l_max)) + l_max
         l_ptrs += M
 
     # 2nd loop to compute max of log normalizers
-    l_acc = tl.zeros([BLOCK_M], dtype=tl.float32)
-    l_ptrs = L + offs_m
-    for i in range(0, S):
-        if DIVISIBLE_M:
-            l = tl.load(l_ptrs)
-        else:
-            l = tl.load(l_ptrs, mask=mask_m)
-        l_acc += tl.exp(l - l_max)
-        l_ptrs += M
-    l_acc = l_max + tl.log(l_acc)
+    # l_acc = tl.zeros([BLOCK_M], dtype=tl.float32)
+    # l_ptrs = L + offs_m
+    # for i in range(0, S):
+    #     if DIVISIBLE_M:
+    #         l = tl.load(l_ptrs)
+    #     else:
+    #         l = tl.load(l_ptrs, mask=mask_m)
+    #     l_acc += tl.exp(l - l_max)
+    #     l_ptrs += M
+    # l_acc = l_max + tl.log(l_acc)
+    # NOTE: we can also use an online algorithm to compute log normalizer
 
-    # second loop to rescale and accumulate o
+    # 3rd loop to rescale and accumulate o
     o_acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
     l_ptrs = L + offs_m
     offs_k = tl.arange(0, BLOCK_DMODEL)
@@ -229,7 +237,7 @@ def _fwd_combine_kv_splits(
 def get_fwd_config(B, H, M, N, D, causal):
     return (16, 128, 1, 4)
 
-# this function is adapted from num_splits_heuristic in flash_attn
+# this function is adapted from https://github.com/Dao-AILab/flash-attention/blob/61a777247900f6c2a37376f3ffd7134385fdc95c/csrc/flash_attn/flash_api.cpp#L235
 def num_splits_herustic(B, H, M, N, D, causal, config, max_splits):
     BLOCK_M, BLOCK_N, num_stages, num_warps = config
     num_blocks_without_split_kv = B * H * triton.cdiv(M, BLOCK_M)
