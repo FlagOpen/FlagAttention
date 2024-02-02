@@ -26,10 +26,11 @@ class FlashAttention(torch.autograd.Function):
 
         # to work around https://github.com/openai/triton/issues/2441
         device = torch.cuda.device_of(q)
+        num_sms = torch.cuda.get_device_properties(device).multi_processor_count
 
         with torch.cuda.device(device):
             config_for_split_kv = get_fwd_config_kv_split(B, H, M, N, D, causal)
-            S = num_splits_herustic(B, H, M, N, D, causal, config_for_split_kv, 128)
+            S = num_splits_herustic(B, H, M, N, config_for_split_kv[0], config_for_split_kv[1], num_sms, 128)
             split_kv: bool = S > 1
 
             if not split_kv:
@@ -57,7 +58,6 @@ class FlashAttention(torch.autograd.Function):
                 )
             else: # split kv
                 BLOCK_M, BLOCK_N, num_stages, num_warps = config_for_split_kv
-
 
                 divisible_m = M % BLOCK_M == 0
                 divisible_n = N % BLOCK_N == 0
