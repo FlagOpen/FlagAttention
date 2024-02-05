@@ -181,17 +181,19 @@ def _fwd_combine_kv_splits(
         mask_m = offs_m < M
 
     # 1st loop: online logsumexp to save a swipe
-    l_max = tl.full([BLOCK_M], value=float("-inf"), dtype=tl.float32)
-    l_acc = tl.full([BLOCK_M], value=float("-inf"), dtype=tl.float32)
+    m = tl.full([BLOCK_M], value=float("-inf"), dtype=tl.float32)
+    acc = tl.full([BLOCK_M], value=float(0.0), dtype=tl.float32)
     l_ptrs = multiple_l + offs_m
     for _ in range(0, S):
         if DIVISIBLE_M:
             l = tl.load(l_ptrs)
         else:
             l = tl.load(l_ptrs, mask=mask_m)
-        l_max = tl.maximum(l_max, l)
-        l_acc = tl.log(tl.exp(l_acc - l_max) + tl.exp(l - l_max)) + l_max
+        m_new = tl.maximum(m, l)
+        acc = acc * tl.exp(m - m_new) + tl.exp(l - m_new)
+        m = m_new
         l_ptrs += M
+    l_acc = m + tl.log(acc)
 
     # 2rd loop to rescale and accumulate o
     o_acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
