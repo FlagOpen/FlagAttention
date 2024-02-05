@@ -8,5 +8,6 @@ except ImportError:
 
 from flag_attn.piecewise import attention as piecewise_attention # noqa: F401
 from flag_attn.flash import attention as flash_attention # noqa: F401
+from flag_attn.split_kv import attention as flash_attention_split_kv # noqa: F401
 
 from flag_attn import testing # noqa: F401
