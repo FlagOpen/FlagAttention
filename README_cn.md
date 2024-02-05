@@ -18,6 +18,18 @@ FlagAttention 目前提供了两个算子。
 
 如果需要更多的定制，FlagAttention 中的算子实现也可以作为参考。
 
+## 更新日志
+
+### v0.1
+
+添加 piecewise_attention 和 flash_attention 算子。
+
+### v0.2
+
+优化算子性能。
+1. 仅在必要时使用 masking.
+2. 使用一个单独的 kernel 来计算 q 的梯度，以避免对全局内存的 RMW 操作。
+
 ## 依赖
 
 FlagAttention 依赖 Torch 和 Triton。 为了使用 Triton 的新功能，建议使用 nightly 版。

@@ -18,6 +18,19 @@ FlagAttention now offers two operators.
 
 When further customization is required, FlagAttention servers as an example.
 
+## Changelog
+
+### v0.1
+
+Add piecewise_attention & flash_attention.
+
+### v0.2
+
+Optimization of operators.
+1. applying mask only when needed.
+2. use a separate kernel to compute the gradien of q to avoid atomic RMW to global memory.
+
+
 ## Requirements
 
 FlagAttention requires Pytorch and Triton. To use the new features of Triton, a nightly release is recommended.
@@ -235,5 +248,5 @@ The performance of piecewise_attention has improved compared to that in v0.1. In
 
 ## More
 
-For more about the open source system for large models from BAAI, please with [BAAI?FlagOpen](https://flagopen.baai.ac.cn/).
+For more about the open source system for large models from BAAI, please with [BAAI/FlagOpen](https://flagopen.baai.ac.cn/).
 [<img src="./assets/logo/baai-flagopen.jpeg">](https://flagopen.baai.ac.cn/)
