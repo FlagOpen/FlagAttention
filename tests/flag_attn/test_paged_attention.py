@@ -1,65 +1,46 @@
 import torch
 import pytest
 
-import triton
-import triton.language as tl
-
 import flag_attn
-
-# from paged import paged_attention
-# from testing.paged import paged_attention as torch_paged_attention
-
 
 NUM_BLOCKS = 1000
 
-@pytest.mark.parametrize('num_seqs', [1, 32])
-@pytest.mark.parametrize('num_query_heads', [64])
-@pytest.mark.parametrize('query_group_size', [1, 8])
-@pytest.mark.parametrize('head_size', [64])
-@pytest.mark.parametrize('block_size', [16, 256])
-@pytest.mark.parametrize('max_seq_len', [4096])
-@pytest.mark.parametrize('version', [1, 2])
-def test_paged_attention(
+
+def base_paged_attention(
     num_seqs,
     num_query_heads,
     query_group_size,
     head_size,
     block_size,
     max_seq_len,
-    version,
+    partition_size=256,
+    num_splits=0,
     dtype=torch.float16,
     device="cuda",
 ):
     torch.set_default_dtype(dtype)
     torch.set_default_device(device=device)
 
-    # torch.cuda.manual_seed(seed)
-
     num_kv_heads = num_query_heads // query_group_size
-    # QUERY_GROUP_SIZE = num_query_heads // num_kv_heads
-    
-    # 初始化每个 seq 的长度
-    context_lens = torch.randint(1, max_seq_len, [num_seqs],dtype=torch.int32)
+
+    context_lens = torch.randint(1, max_seq_len, [num_seqs], dtype=torch.int32)
+    context_lens[0] = max_seq_len
     max_context_len = context_lens.max().item()
     max_num_blocks_per_seq = (max_context_len + block_size - 1) // block_size
 
-    attn_scale = head_size ** -0.5
+    attn_scale = head_size**-0.5
     q = torch.empty(num_seqs, num_query_heads, head_size)
     q.uniform_(-attn_scale, attn_scale)
-    out = torch.empty_like(q)
 
-    k_cache = torch.empty(NUM_BLOCKS, num_kv_heads,block_size, head_size)
+    k_cache = torch.empty(NUM_BLOCKS, num_kv_heads, block_size, head_size)
     k_cache.uniform_(-attn_scale, attn_scale)
     v_cache = torch.empty_like(k_cache)
     v_cache.uniform_(-attn_scale, attn_scale)
 
     # (NUM_SEQS, MAX_NUM_BLOCKS_PER_SEQ)
-    block_tables = torch.randint(
-        0, NUM_BLOCKS, (num_seqs, max_num_blocks_per_seq))
-    
-    print("version: ",version)
-    flag_attn.paged_attention(
-        out,
+    block_tables = torch.randint(0, NUM_BLOCKS, (num_seqs, max_num_blocks_per_seq))
+
+    out = flag_attn.paged_attention(
         q,
         k_cache,
         v_cache,
@@ -67,12 +48,11 @@ def test_paged_attention(
         block_tables,
         attn_scale,
         max_context_len,
-        version = version,
+        partition_size,
+        num_splits,
     )
 
-    ref_out = torch.empty_like(out)
-    flag_attn.testing.paged_attention(
-        ref_out,
+    ref_out = flag_attn.testing.paged_attention(
         q,
         k_cache,
         v_cache,
@@ -82,3 +62,87 @@ def test_paged_attention(
     )
     print(torch.abs(out - ref_out).max())
     assert torch.allclose(out, ref_out, atol=1e-3, rtol=1e-5)
+
+
+@pytest.mark.parametrize("num_seqs", [1, 32])
+@pytest.mark.parametrize("num_query_heads", [64])
+@pytest.mark.parametrize("query_group_size", [1, 8])
+@pytest.mark.parametrize("head_size", [64, 128])
+@pytest.mark.parametrize("block_size", [16, 256])
+@pytest.mark.parametrize("max_seq_len", [512, 4096])
+def test_paged_attention_default(
+    num_seqs,
+    num_query_heads,
+    query_group_size,
+    head_size,
+    block_size,
+    max_seq_len,
+    dtype=torch.float16,
+    device="cuda",
+):
+    base_paged_attention(
+        num_seqs,
+        num_query_heads,
+        query_group_size,
+        head_size,
+        block_size,
+        max_seq_len,
+    )
+
+
+@pytest.mark.parametrize("num_seqs", [1, 32])
+@pytest.mark.parametrize("num_query_heads", [64])
+@pytest.mark.parametrize("query_group_size", [1, 8])
+@pytest.mark.parametrize("head_size", [64, 128])
+@pytest.mark.parametrize("block_size", [32])
+@pytest.mark.parametrize("max_seq_len", [2048])
+@pytest.mark.parametrize("partition_size", [32, 128, 256])
+def test_paged_attention_by_partition_size(
+    num_seqs,
+    num_query_heads,
+    query_group_size,
+    head_size,
+    block_size,
+    max_seq_len,
+    partition_size,
+    dtype=torch.float16,
+    device="cuda",
+):
+    base_paged_attention(
+        num_seqs,
+        num_query_heads,
+        query_group_size,
+        head_size,
+        block_size,
+        max_seq_len,
+        partition_size,
+    )
+
+
+@pytest.mark.parametrize("num_seqs", [1, 32])
+@pytest.mark.parametrize("num_query_heads", [64])
+@pytest.mark.parametrize("query_group_size", [1, 8])
+@pytest.mark.parametrize("head_size", [64, 128])
+@pytest.mark.parametrize("block_size", [16])
+@pytest.mark.parametrize("max_seq_len", [2048])
+@pytest.mark.parametrize("num_splits", [1, 2, 3, 4, 5, 6, 7, 8])
+def test_paged_attention_by_num_splits(
+    num_seqs,
+    num_query_heads,
+    query_group_size,
+    head_size,
+    block_size,
+    max_seq_len,
+    num_splits,
+    dtype=torch.float16,
+    device="cuda",
+):
+    base_paged_attention(
+        num_seqs,
+        num_query_heads,
+        query_group_size,
+        head_size,
+        block_size,
+        max_seq_len,
+        num_splits=num_splits,
+    )

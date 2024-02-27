@@ -4,27 +4,14 @@ import torch
 
 def attention(
     query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    scale: float,
-) -> torch.Tensor:
-    # S = scale * torch.matmul(query, key.transpose(1,2)).float() qkhh khd khd
-    # P = torch.softmax(S, dim=-1).to(value.dtype)
-    # out = torch.matmul(P, value).to(query.dtype)
-    attn_weights = scale * torch.einsum("qhd,khd->hqk", query.float(), key.float())
-    attn_weights = torch.softmax(attn_weights, dim=-1)
-    out = torch.einsum("hqk,khd->qhd", attn_weights, value.float())
-    return out.to(value.dtype)
-
-def paged_attention(
-    output: torch.Tensor,
-    query: torch.Tensor,
     key_cache: torch.Tensor,
     value_cache: torch.Tensor,
     block_tables: torch.Tensor,
     context_lens: torch.Tensor,
     scale: float,
 ) -> None:
+    output = torch.empty_like(query)
+
     num_query_heads = query.shape[1]
     num_kv_heads = value_cache.shape[1]
     num_queries_per_kv = num_query_heads // num_kv_heads
@@ -55,7 +42,11 @@ def paged_attention(
             keys = torch.repeat_interleave(keys, num_queries_per_kv, dim=1)
             values = torch.repeat_interleave(values, num_queries_per_kv, dim=1)
 
-        out = attention(q, keys, values, scale)
+        S = torch.bmm(q.transpose(0, 1).float(), keys.permute(1, 2, 0).float()) * scale
+        P = torch.softmax(S, dim=-1)
+        out = torch.bmm(P, values.transpose(0, 1).float()).transpose(0, 1)
+        out = out.to(values.dtype)
         out = out.view(num_query_heads, head_size)
         output[i].copy_(out, non_blocking=True)
 
+    return output
