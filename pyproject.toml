@@ -17,8 +17,7 @@ classifiers = [
 # Not specifing triton version here because torch has its own required triton version
 # FlagAttention needs a recent version of triton (triton nightly or 2.2.0) to run.
 dependencies = [
-    "torch>=2.0.0",
-    "triton"
+    "triton>=2.2.0"
 ]
 
 [project.optional-dependencies]

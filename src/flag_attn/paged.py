@@ -11,7 +11,6 @@ def attention(
     block_tables: torch.Tensor,  # [num_seqs, max_num_blocks_per_seq]
     attn_scale: float,
     max_context_len: int,
-    partition_size: int = 256,
     num_splits: int = 0,
 ) -> None:
     out = torch.empty_like(query)
@@ -30,7 +29,7 @@ def attention(
     else:
         padded_group_size = triton.next_power_of_2(query_group_size)
 
-    assert head_size in [64, 128, 256], f"head_size={head_size}"
+    assert head_size in (32, 64, 128, 256), f"head_size={head_size}"
     assert kv_block_size >= 16
     assert query_group_size in [1, 2, 4, 8, 16, 32, 64, 128, 256]
 
@@ -51,14 +50,13 @@ def attention(
     elif num_splits > 1:
         partition_size = triton.cdiv(max_context_len, num_splits)
         partition_size = triton.next_power_of_2(partition_size)
-        assert partition_size >= kv_block_size
 
     with torch.cuda.device(device):
         if num_splits == 1:
             grid = (num_seqs, num_kv_heads, 1)
             _paged_attn_kernel[grid](
-                out,
-                out,
+                out,  # dummy input
+                out,  # dummy input
                 out,
                 query,
                 key_cache,
@@ -107,6 +105,9 @@ def attention(
                 device=out.device,
             )
 
+            assert (
+                partition_size >= kv_block_size
+            ), f"partition_size {partition_size} >= kv_block_size {kv_block_size}"
             _paged_attn_kernel[grid](
                 m_i,
                 l_i,
@@ -170,11 +171,22 @@ def get_num_warps(QUERY_GROUP_SIZE, HEAD_SIZE, KV_BLOCK_SIZE):
         return 4
 
 
-def get_num_stages(PARTITION_SIZE):
+def get_num_stages(PARTITION_SIZE, KV_BLOCK_SIZE):
     if PARTITION_SIZE == 0:
         return 1
     else:
-        return 2
+        if torch.cuda.get_device_capability() == (8, 0):
+            if KV_BLOCK_SIZE < 256:
+                return 3
+            else:
+                return 2
+        elif torch.cuda.get_device_capability() == (8, 6):
+            if KV_BLOCK_SIZE < 256:
+                return 2
+            else:
+                return 1
+        else:
+            return 1
 
 
 @triton.heuristics(
@@ -182,7 +194,9 @@ def get_num_stages(PARTITION_SIZE):
         "num_warps": lambda args: get_num_warps(
             args["QUERY_GROUP_SIZE"], args["HEAD_SIZE"], args["KV_BLOCK_SIZE"]
         ),
-        "num_stages": lambda args: get_num_stages(args["QUERY_GROUP_SIZE"]),
+        "num_stages": lambda args: get_num_stages(
+            args["QUERY_GROUP_SIZE"], args["KV_BLOCK_SIZE"]
+        ),
     }
 )
 @triton.jit
@@ -220,6 +234,12 @@ def _paged_attn_kernel(
     kv_head_idx = tl.program_id(1)
     part_idx = tl.program_id(2)
     max_num_partitions = tl.num_programs(2)
+
+    # scale sm_scale by log_2(e) and use
+    # 2^x instead of exp in the loop because CSE and LICM
+    # don't work as expected with `exp` in the loop
+    log2e: tl.constexpr = 1.4426950408889634
+    qk_scale = attn_scale * log2e
 
     USE_PARTITIONING = PARTITION_SIZE > 0
     context_len = tl.load(context_lens_ptr + seq_idx)
@@ -280,13 +300,11 @@ def _paged_attn_kernel(
         qk *= attn_scale
         qk = tl.where(mask_offset < context_len, qk, float("-inf"))
 
-        # m_ij: [PADDED_QUERY_GROUP_SIZE]
-        m_ij = tl.max(qk, axis=1)
-        m_i_new = tl.maximum(m_i, m_ij)
+        m_i_new = tl.maximum(m_i, tl.max(qk, axis=1))
 
         # p: [PADDED_QUERY_GROUP_SIZE, KV_BLOCK_SIZE]
-        p = tl.exp(qk - m_i_new[:, None])
-        alpha = tl.exp(m_i - m_i_new)
+        p = tl.math.exp2((qk - m_i_new[:, None]) * qk_scale)
+        alpha = tl.math.exp2((m_i - m_i_new) * qk_scale)
         acc *= alpha[:, None]
 
         # v: [KV_BLOCK_SIZE, HEAD_SIZE]
