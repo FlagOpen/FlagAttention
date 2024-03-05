@@ -20,7 +20,6 @@ def attention(
     kv_block_size = key_cache.shape[2]
     head_size = key_cache.shape[3]
     query_group_size = query.shape[1] // num_kv_heads
-    max_num_blocks_per_seq = block_tables.shape[1]
 
     if query_group_size == 1:
         padded_group_size = 1
@@ -29,9 +28,10 @@ def attention(
     else:
         padded_group_size = triton.next_power_of_2(query_group_size)
 
-    assert head_size in (32, 64, 128, 256), f"head_size={head_size}"
-    assert kv_block_size >= 16
-    assert query_group_size in [1, 2, 4, 8, 16, 32, 64, 128, 256]
+    assert head_size in (16, 32, 64, 128, 256, 512), f"head_size={head_size}"
+    assert padded_group_size == 1 or kv_block_size >= 16, f"kv_block_size={kv_block_size}"
+    # query_group_size in (1, 2, 4, 8, 16, 32, 64, 128, 256)
+    # assert query_group_size > 0 and query_group_size & (query_group_size-1) == 0, f"query_group_size={query_group_size}"
 
     # config for A100
     device = torch.cuda.device_of(query)
@@ -63,8 +63,9 @@ def attention(
                 value_cache,
                 context_lens,
                 block_tables,
-                max_num_blocks_per_seq,
                 attn_scale,
+                block_tables.stride(0),
+                block_tables.stride(1),
                 query.stride(0),
                 query.stride(1),
                 query.stride(2),
@@ -105,9 +106,8 @@ def attention(
                 device=out.device,
             )
 
-            assert (
-                partition_size >= kv_block_size
-            ), f"partition_size {partition_size} >= kv_block_size {kv_block_size}"
+            assert (partition_size >= kv_block_size) and (partition_size % kv_block_size == 0), \
+                f"partition_size={partition_size}, kv_block_size={kv_block_size}"
             _paged_attn_kernel[grid](
                 m_i,
                 l_i,
@@ -117,8 +117,9 @@ def attention(
                 value_cache,
                 context_lens,
                 block_tables,
-                max_num_blocks_per_seq,
                 attn_scale,
+                block_tables.stride(0),
+                block_tables.stride(1),
                 query.stride(0),
                 query.stride(1),
                 query.stride(2),
@@ -209,8 +210,9 @@ def _paged_attn_kernel(
     v_cache_ptr,  # [num_blocks, NUM_KV_HEADS, KV_BLOCK_SIZE, HEAD_SIZE]
     context_lens_ptr,  # [num_seqs]
     block_tables_ptr,  # [num_seqs, max_num_blocks_per_seq]
-    max_num_blocks_per_seq,
     attn_scale,
+    stride_bt0,
+    stride_bt1,
     stride_q0,
     stride_q1,
     stride_q2,
@@ -239,7 +241,6 @@ def _paged_attn_kernel(
     # 2^x instead of exp in the loop because CSE and LICM
     # don't work as expected with `exp` in the loop
     log2e: tl.constexpr = 1.4426950408889634
-    qk_scale = attn_scale * log2e
 
     USE_PARTITIONING = PARTITION_SIZE > 0
     context_len = tl.load(context_lens_ptr + seq_idx)
@@ -280,7 +281,7 @@ def _paged_attn_kernel(
     for i in range(num_blocks):
         block_idx = num_prev_blocks + i
         block_number = tl.load(
-            block_tables_ptr + seq_idx * max_num_blocks_per_seq + block_idx
+            block_tables_ptr + seq_idx * stride_bt0 + block_idx * stride_bt1
         )
 
         # Load a key block.
@@ -303,8 +304,8 @@ def _paged_attn_kernel(
         m_i_new = tl.maximum(m_i, tl.max(qk, axis=1))
 
         # p: [PADDED_QUERY_GROUP_SIZE, KV_BLOCK_SIZE]
-        p = tl.math.exp2((qk - m_i_new[:, None]) * qk_scale)
-        alpha = tl.math.exp2((m_i - m_i_new) * qk_scale)
+        p = tl.math.exp2((qk - m_i_new[:, None]) * log2e)
+        alpha = tl.math.exp2((m_i - m_i_new) * log2e)
         acc *= alpha[:, None]
 
         # v: [KV_BLOCK_SIZE, HEAD_SIZE]

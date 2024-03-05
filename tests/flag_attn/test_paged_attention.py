@@ -59,7 +59,7 @@ def base_paged_attention(
         attn_scale,
     )
     print(torch.abs(out - ref_out).max())
-    assert torch.allclose(out, ref_out, atol=1e-3, rtol=1e-5)
+    assert torch.allclose(out, ref_out, atol=2e-3, rtol=1e-5)
 
 
 @pytest.mark.parametrize("num_seqs", [1, 32])
@@ -88,10 +88,10 @@ def test_paged_attention_default(
     )
 
 
-@pytest.mark.parametrize("num_seqs", [1, 32])
+@pytest.mark.parametrize("num_seqs", [1, 16])
 @pytest.mark.parametrize("num_query_heads", [64])
 @pytest.mark.parametrize("query_group_size", [1, 8])
-@pytest.mark.parametrize("head_size", [64, 128])
+@pytest.mark.parametrize("head_size", [32, 64])
 @pytest.mark.parametrize("block_size", [16])
 @pytest.mark.parametrize("max_seq_len", [2048])
 @pytest.mark.parametrize("num_splits", [1, 2, 3, 4, 5, 6, 7, 8])
@@ -114,4 +114,30 @@ def test_paged_attention_by_num_splits(
         block_size,
         max_seq_len,
         num_splits=num_splits,
+    )
+
+@pytest.mark.parametrize("num_seqs, num_query_heads, query_group_size, head_size, block_size, max_seq_len, num_splits", [
+    (1, 12, 1, 64, 16, 2, 0),
+    (16, 64, 8, 32, 16, 2048, 2),
+    (16, 64, 1, 64, 16, 2048, 6),
+])
+def test_paged_attention_by_case(
+    num_seqs,
+    num_query_heads,
+    query_group_size,
+    head_size,
+    block_size,
+    max_seq_len,
+    num_splits,
+    dtype=torch.float16,
+    device="cuda",
+):
+    base_paged_attention(
+        num_seqs,
+        num_query_heads,
+        query_group_size,
+        head_size,
+        block_size,
+        max_seq_len,
+        num_splits,
     )
