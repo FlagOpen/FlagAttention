@@ -34,6 +34,7 @@ def attention(
     # assert query_group_size > 0 and query_group_size & (query_group_size-1) == 0, f"query_group_size={query_group_size}"
 
     # config for A100
+    # TODO: support more devices and optimize
     device = torch.cuda.device_of(query)
     num_sms = torch.cuda.get_device_properties(device).multi_processor_count
     if num_splits == 0:
