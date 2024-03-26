@@ -1,5 +1,9 @@
 # FlagAttention
 
+<p align="center">
+    <img src="./assets/logo/horizontal-blue.png" width = "400" alt="flag-attention" >
+</p>
+
 [English](./README.md)
 
 
@@ -13,6 +17,18 @@ FlagAttention 目前提供了两个算子。
 2. piecewise_attention. 这个算子用于实现 NLPE(non linear position embedding)，目前用于 [Aquila-2-34B](https://github.com/FlagAI-Open/Aquila2) 模型的训练和推理。
 
 如果需要更多的定制，FlagAttention 中的算子实现也可以作为参考。
+
+## 更新日志
+
+### v0.1
+
+添加 piecewise_attention 和 flash_attention 算子。
+
+### v0.2
+
+优化算子性能。
+1. 仅在必要时使用 masking.
+2. 使用一个单独的 kernel 来计算 q 的梯度，以避免对全局内存的 RMW 操作。
 
 ## 依赖
 
@@ -66,7 +82,7 @@ pip install dist/flag_attn-xxx.whl
 
 ## 使用方式
 
-FlagAttention 提供了自定义的 attention 算子。当一个算子的功能和 torch 函数等价的时候，就可以用它替换对应的 torch 函数。 
+FlagAttention 提供了自定义的 attention 算子。当一个算子的功能和 torch 函数等价的时候，就可以用它替换对应的 torch 函数。
 
 ## 运行测试
 
@@ -220,3 +236,8 @@ print(gq)
 2. 在更多 Triton 版本上进行测试；
 3. 提高算子的性能；
 4. 支持对 FlashAttention 的其他功能扩展。
+
+## 更多
+
+关于智源研究院的更多大模型开源技术，请访问 [BAAI/FlagOpen](https://flagopen.baai.ac.cn/) 查看。
+[<img src="./assets/logo/baai-flagopen.jpeg">](https://flagopen.baai.ac.cn/)

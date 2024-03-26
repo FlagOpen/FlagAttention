@@ -1,5 +1,9 @@
 # FlagAttention
 
+<p align="center">
+    <img src="./assets/logo/horizontal-blue.png" width = "400" alt="flag-attention" >
+</p>
+
 [中文版](./README_cn.md)
 
 FlagAttention is a project for memory-efficient attention operators implemented in the [Triton language](https://github.com/openai/triton). Motivated by the need for non-standard attention operators in language modeling, it starts as an extension of multi-head attention.
@@ -13,6 +17,19 @@ FlagAttention now offers two operators.
 2. **piecewise_attention**. Currently employed for NLPE(Non-Linearized position embedding) in both training and inference of the [Aquila-2-34B](https://github.com/FlagAI-Open/Aquila2) model.
 
 When further customization is required, FlagAttention servers as an example.
+
+## Changelog
+
+### v0.1
+
+Add piecewise_attention & flash_attention.
+
+### v0.2
+
+Optimization of operators.
+1. applying mask only when needed.
+2. use a separate kernel to compute the gradien of q to avoid atomic RMW to global memory.
+
 
 ## Requirements
 
@@ -75,7 +92,7 @@ FlagAttention provides customized operators for attention. When an operator is e
 
 A recent version of `pytest`(>=7.1.0) is required to run the tests in `tests/`. Operators in `FlagAttention` are tested against [reference implementations](src/flag_attn/testing) in Pytorch provided by `flag_attn.testing`, both for the forward and backward operators. For operators with support for inputs of `float16` or `bfloat16`, three different implementations are included for numerical accuracy testing.
 
-1. **Reference Implementation in Pytorch**: This implementation upcasts the inputs to `float32` and performs the computations in `float32` all the way through before casting the outputs to `float16` or `bfloat16`. 
+1. **Reference Implementation in Pytorch**: This implementation upcasts the inputs to `float32` and performs the computations in `float32` all the way through before casting the outputs to `float16` or `bfloat16`.
 2. **Triton Implementation**: The Triton implementation uses `float16` or `bfloat16` for MMA(matrix multiplication accumulation) inputs and `float32` for MMA outputs and other computations.
 3. **Pytorch Implementation**: This implementation mirrors the computations in the reference implementation, except that the precision is the same as the Triton implementation.
 
@@ -114,9 +131,9 @@ In addition to the attention outputs, it can return some extra outputs dependes 
 
 ### piecewise_attention
 
-The first extension to FlashAttention is [piecewise_attention](src/flag_attn/piecewise.py). This operator enhances FlashAttention by using two `q`'s and two `k`'s to calculate the attention scores(S) before applying softmax to obtain the attention weights(P). 
+The first extension to FlashAttention is [piecewise_attention](src/flag_attn/piecewise.py). This operator enhances FlashAttention by using two `q`'s and two `k`'s to calculate the attention scores(S) before applying softmax to obtain the attention weights(P).
 
-The rationale behind this design is rooted in the observations that a transformer with rotary position embedding struggles with predicting sequences longer than the maximum sequence length it is trained on. Pairs of `(q, k)` yield unexpectedly high attention scores when the distance exceeds the maximum sequence length in the training set. 
+The rationale behind this design is rooted in the observations that a transformer with rotary position embedding struggles with predicting sequences longer than the maximum sequence length it is trained on. Pairs of `(q, k)` yield unexpectedly high attention scores when the distance exceeds the maximum sequence length in the training set.
 
 To address this issue, BAAI proposes NLPE(Non-Linearized Position Embedding), which applies two different position embeddings to `q` and `k` based on whether the distance between `q` and `k` exceeds a pre-defined threshold, producing `q1, q2` and `k1, k2`. Then the attention score is computed as the dot product of `q1, k1` or `q2, k2` depending on the distance between `q` and `k`.
 
@@ -214,7 +231,8 @@ The performance of piecewise_attention has improved compared to that in v0.1. In
 - support causal and non-causal modes;
 - support forward & backward modes;
 - the sequence length of k/v can be different from that of q;
-- support computation of total attention of each `k` gets from all `q`'s.
+- support computation of total attention of each `k` gets from all `q`'s;
+- supports returning accumulative attention of each keys.
 
 #### Limitations
 
@@ -227,3 +245,8 @@ The performance of piecewise_attention has improved compared to that in v0.1. In
 2. Test on more versions of triton；
 3. Improve performance of attention operators(especially for the backward op);
 4. Support other extensions to flash attention.
+
+## More
+
+For more about the open source system for large models from BAAI, please with [BAAI/FlagOpen](https://flagopen.baai.ac.cn/).
+[<img src="./assets/logo/baai-flagopen.jpeg">](https://flagopen.baai.ac.cn/)
