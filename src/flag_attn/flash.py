@@ -32,7 +32,7 @@ class FlashAttention(torch.autograd.Function):
             n_dropouts = B * H * M * N
             seed, offset = philox_cuda_seed_offset(n_dropouts)
         else:
-            seed, offset = None, None
+            seed, offset = 0, 0
 
         # to work around https://github.com/openai/triton/issues/2441
         device = torch.cuda.device_of(q)
@@ -181,7 +181,7 @@ class FlashAttention(torch.autograd.Function):
                 do.stride(0), do.stride(1), do.stride(2), do.stride(3),
                 delta.stride(0), delta.stride(1), delta.stride(2),
                 M,
-                IS_DROPOUT=is_dropout
+                IS_DROPOUT=is_dropout,
                 BLOCK_M=BLOCK_M, D_HEAD=D,
                 DIVISIBLE_M=divisible_m,
             )
@@ -190,11 +190,13 @@ class FlashAttention(torch.autograd.Function):
             dv = torch.empty_like(v)
             grid = (triton.cdiv(N, BLOCK_N), H, B)
             _bwd_kv_kernel[grid](
-                q, k, v, 
-                dropout_p,
+                q, k, v,
                 sm_scale,
                 do, dk, dv,
                 L, delta,
+                dropout_p,
+                seed,
+                offset,
                 q.stride(0), q.stride(1), q.stride(2), q.stride(3),
                 k.stride(0), k.stride(1), k.stride(2), k.stride(3),
                 v.stride(0), v.stride(1), v.stride(2), v.stride(3),
@@ -214,19 +216,23 @@ class FlashAttention(torch.autograd.Function):
                 q, k, v, sm_scale, do,
                 dq,
                 L, delta,
+                dropout_p,
+                seed,
+                offset,
                 q.stride(0), q.stride(1), q.stride(2), q.stride(3),
                 k.stride(0), k.stride(1), k.stride(2), k.stride(3),
                 v.stride(0), v.stride(1), v.stride(2), v.stride(3),
                 do.stride(0), do.stride(1), do.stride(2), do.stride(3),
                 dq.stride(0), dq.stride(1), dq.stride(2), dq.stride(3),
                 B, H, M, N, P_SEQ,
+                IS_DROPOUT=is_dropout,
                 BLOCK_M=BLOCK_M, BLOCK_DMODEL=D, BLOCK_N=BLOCK_N,
                 CAUSAL=causal, LARGER_M=larger_m,
                 DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
                 num_stages=num_stages, num_warps = num_warps,
             )
 
-        return dq, dk, dv, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None
 
 
 def attention(q, k, v, causal=False, sm_scale=None, dropout_p=0.0,
@@ -332,7 +338,7 @@ def _fwd_kernel(
     offs_m = start_m * BLOCK_M + offs_m_base
     offs_n_base = tl.arange(0, BLOCK_N)
     offs_k = tl.arange(0, BLOCK_DMODEL)
-    
+
     if IS_DROPOUT:
         rowblock_base = off_z * H * M * N + off_h * M * N + start_m * BLOCK_M * N
         offs_rng_base = offset + rowblock_base
@@ -542,6 +548,8 @@ def _bwd_kv_kernel(
     L,
     D,
     dropout_p,
+    seed,
+    offset,
     stride_qz, stride_qh, stride_qm, stride_qk,
     stride_kz, stride_kh, stride_kn, stride_kk,
     stride_vz, stride_vh, stride_vn, stride_vk,
@@ -549,9 +557,8 @@ def _bwd_kv_kernel(
     stride_dkz, stride_dkh, stride_dkn, stride_dkk,
     stride_dvz, stride_dvh, stride_dvn, stride_dvk,
     Z, H, M, N, P_SEQ,
-    IS_DROPOUT: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr,
-    CAUSAL: tl.constexpr,
+    CAUSAL: tl.constexpr, IS_DROPOUT: tl.constexpr,
     DIVISIBLE_M: tl.constexpr, DIVISIBLE_N: tl.constexpr,
 ):
     input_dtype = Q.dtype.element_ty
@@ -704,15 +711,16 @@ def _bwd_q_kernel(
     L,
     D,
     dropout_p,
+    seed,
+    offset,
     stride_qz, stride_qh, stride_qm, stride_qk,
     stride_kz, stride_kh, stride_kn, stride_kk,
     stride_vz, stride_vh, stride_vn, stride_vk,
     stride_doz, stride_doh, stride_dom, stride_dok,
     stride_dqz, stride_dqh, stride_dqm, stride_dqk,
     Z, H, M, N, P_SEQ,
-    IS_DROPOUT,
     BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr,
-    CAUSAL: tl.constexpr, LARGER_M: tl.constexpr,
+    CAUSAL: tl.constexpr, IS_DROPOUT: tl.constexpr, LARGER_M: tl.constexpr,
     DIVISIBLE_M: tl.constexpr, DIVISIBLE_N: tl.constexpr,
 ):
     input_dtype = Q.dtype.element_ty
