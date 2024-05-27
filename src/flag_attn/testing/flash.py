@@ -16,6 +16,15 @@ def attention(q,
     D = q.shape[-1]
     if sm_scale is None:
         sm_scale = 1. / math.sqrt(D)
+
+    num_heads_q = q.shape[1]
+    num_heads_k = k.shape[1]
+    assert num_heads_q % num_heads_k == 0
+    num_groups = num_heads_q // num_heads_k
+
+    if num_groups > 1:
+        k = torch.repeat_interleave(k, repeats=num_groups, dim=1)
+        v = torch.repeat_interleave(v, repeats=num_groups, dim=1)
     kv_seq_len = k.shape[-2]
     q_seq_len = q.shape[-2]
     p_seq = kv_seq_len - q_seq_len

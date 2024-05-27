@@ -19,7 +19,7 @@ def _fwd_split_kv_kernel(
     stride_kz, stride_kh, stride_kn, stride_kk,
     stride_vz, stride_vh, stride_vn, stride_vk,
     stride_oz, stride_oh, stride_os, stride_om, stride_ok,
-    Z, H, M, N, P_SEQ, N_SPLIT_SIZE, S,
+    Z, H, M, N, P_SEQ, N_SPLIT_SIZE, S, num_groups,
     BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr,
     IS_CAUSAL: tl.constexpr, LARGER_M: tl.constexpr,
     DIVISIBLE_M: tl.constexpr, DIVISIBLE_N: tl.constexpr,
@@ -31,6 +31,7 @@ def _fwd_split_kv_kernel(
     off_zh = tl.program_id(2)
     off_h = off_zh % H
     off_z = off_zh // H
+    off_hk = off_h // num_groups
 
     # scale sm_scale by log_2(e) and use
     # 2^x instead of exp in the loop because CSE and LICM
@@ -40,8 +41,8 @@ def _fwd_split_kv_kernel(
 
     # offset pointers for (batch & head)
     Q += off_z * stride_qz + off_h * stride_qh
-    K += off_z * stride_kz + off_h * stride_kh
-    V += off_z * stride_vz + off_h * stride_vh
+    K += off_z * stride_kz + off_hk * stride_kh
+    V += off_z * stride_vz + off_hk * stride_vh
 
     # offset pointers for (batch & head, split)
     O += off_z * stride_oz + off_h * stride_oh + n_split_id * stride_os # o's shape is (B, H, S, M, D)
@@ -269,6 +270,10 @@ def attention(q, k, v, causal=False, sm_scale=None):
 
     B, H, M, D = q.shape
     N = k.shape[2]
+    Hk, Hv = k.shape[1], v.shape[1]
+    assert Hk == Hv, "num of heads in k and v should be equal"
+    assert H % Hk == 0, "number of heads in q must be a multiple of that in k & v"
+    num_groups = H // Hk
     P_SEQ = N - M
     larger_m = M > N
 
@@ -299,7 +304,7 @@ def attention(q, k, v, causal=False, sm_scale=None):
             k.stride(0), k.stride(1), k.stride(2), k.stride(3),
             v.stride(0), v.stride(1), v.stride(2), v.stride(3),
             multiple_o.stride(0), multiple_o.stride(1), multiple_o.stride(2), multiple_o.stride(3), multiple_o.stride(4),
-            B, H, M, N, P_SEQ, N_SPLIT_SIZE, S,
+            B, H, M, N, P_SEQ, N_SPLIT_SIZE, S, num_groups,
             BLOCK_M=BLOCK_M, BLOCK_DMODEL=D, BLOCK_N=BLOCK_N,
             IS_CAUSAL=causal, LARGER_M=larger_m,
             DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
