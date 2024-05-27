@@ -19,30 +19,40 @@ def report(name, actual, expected):
 
 @pytest.mark.parametrize('device_id', list(range(torch.cuda.device_count())))
 @pytest.mark.parametrize('scale', [1.0, 2.0, 3.0, 4.0])
-@pytest.mark.parametrize('B, H, M, N, D', [
-    (2, 4, 512, 612, 128),
-    (2, 4, 1024, 1034, 64),
-    (2, 4, 2048, 2048, 32),
-    (2, 4, 4096, 4096, 16),
-    (2, 4, 4001, 4001, 32),
-    (2, 4, 4001, 4096, 64),
-    (2, 4, 4096, 4000, 128),
-    (1, 2, 8192, 8202, 16),
-    (1, 2, 8192, 8192, 32),
+@pytest.mark.parametrize('B, Hq, Hk, M, N, D', [
+    (2, 4, 4, 512, 612, 128),
+    (2, 4, 4, 1024, 1034, 64),
+    (2, 4, 4, 2048, 2048, 32),
+    (2, 4, 4, 4096, 4096, 16),
+    (2, 4, 4, 4001, 4001, 32),
+    (2, 4, 4, 4001, 4096, 64),
+    (2, 4, 4, 4096, 4000, 128),
+    (1, 2, 2, 8192, 8202, 16),
+    (1, 2, 2, 8192, 8192, 32),
+    # test for mqa/gqa
+    (2, 4, 2, 512, 612, 128),
+    (2, 4, 1, 1024, 1034, 64),
+    (2, 4, 2, 2048, 2048, 32),
+    (2, 4, 1, 4096, 4096, 16),
+    (2, 4, 2, 4001, 4001, 32),
+    (2, 4, 1, 4001, 4096, 64),
+    (2, 4, 2, 4096, 4000, 128),
+    (1, 2, 1, 8192, 8202, 16),
+    (1, 2, 1, 8192, 8192, 32),
 ])
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize('stride_order', ['BHTD', 'BTHD'])
-def test_attention_fwd(B, H, M, N, D, causal, stride_order, dtype, scale, device_id):
+def test_attention_fwd(B, Hq, Hk, M, N, D, causal, stride_order, dtype, scale, device_id):
     device = f"cuda:{device_id}"
     if stride_order == "BHTD":
-        q = torch.empty((B, H, M, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
-        k = torch.empty((B, H, N, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
-        v = torch.empty((B, H, N, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
+        q = torch.empty((B, Hq, M, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
+        k = torch.empty((B, Hk, N, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
+        v = torch.empty((B, Hk, N, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
     else:
-        q = torch.empty((B, M, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
-        k = torch.empty((B, N, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
-        v = torch.empty((B, N, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
+        q = torch.empty((B, M, Hq, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
+        k = torch.empty((B, N, Hk, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
+        v = torch.empty((B, N, Hk, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
 
     o_ref = flag_attn.testing.flash_attention(q, k, v, causal, upcast=True)
     o_torch = flag_attn.testing.flash_attention(q, k, v, causal, upcast=False)
@@ -57,30 +67,40 @@ def test_attention_fwd(B, H, M, N, D, causal, stride_order, dtype, scale, device
 
 @pytest.mark.parametrize('device_id', list(range(torch.cuda.device_count())))
 @pytest.mark.parametrize('scale', [10.0])
-@pytest.mark.parametrize('B, H, M, N, D', [
-    (2, 4, 1, 612, 128),
-    (2, 4, 1, 1034, 64),
-    (2, 4, 1, 2048, 32),
-    (2, 4, 1, 4096, 16),
-    (2, 4, 1, 4001, 32),
-    (2, 4, 1, 4096, 64),
-    (2, 4, 2, 4000, 128),
-    (1, 2, 4, 8202, 16),
-    (1, 2, 1, 8192, 32),
+@pytest.mark.parametrize('B, Hq, Hk, M, N, D', [
+    (2, 4, 4, 1, 612, 128),
+    (2, 4, 4, 1, 1034, 64),
+    (2, 4, 4, 1, 2048, 32),
+    (2, 4, 4, 1, 4096, 16),
+    (2, 4, 4, 1, 4001, 32),
+    (2, 4, 4, 1, 4096, 64),
+    (2, 4, 4, 2, 4000, 128),
+    (1, 2, 2, 4, 8202, 16),
+    (1, 2, 2, 1, 8192, 32),
+    # test for mqa/gqa
+    (2, 4, 2, 1, 612, 128),
+    (2, 4, 1, 1, 1034, 64),
+    (2, 4, 2, 1, 2048, 32),
+    (2, 4, 1, 1, 4096, 16),
+    (2, 4, 2, 1, 4001, 32),
+    (2, 4, 1, 1, 4096, 64),
+    (2, 4, 2, 2, 4000, 128),
+    (1, 2, 1, 4, 8202, 16),
+    (1, 2, 1, 1, 8192, 32),
 ])
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize('stride_order', ['BHTD', 'BTHD'])
-def test_attention_splitkv(B, H, M, N, D, causal, stride_order, dtype, scale, device_id):
+def test_attention_splitkv(B, Hq, Hk, M, N, D, causal, stride_order, dtype, scale, device_id):
     device = f"cuda:{device_id}"
     if stride_order == "BHTD":
-        q = torch.empty((B, H, M, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
-        k = torch.empty((B, H, N, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
-        v = torch.empty((B, H, N, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
+        q = torch.empty((B, Hq, M, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
+        k = torch.empty((B, Hk, N, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
+        v = torch.empty((B, Hk, N, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
     else:
-        q = torch.empty((B, M, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
-        k = torch.empty((B, N, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
-        v = torch.empty((B, N, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
+        q = torch.empty((B, M, Hq, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
+        k = torch.empty((B, N, Hk, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
+        v = torch.empty((B, N, Hk, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
 
     o_ref = flag_attn.testing.flash_attention(q, k, v, causal, upcast=True)
     o_torch = flag_attn.testing.flash_attention(q, k, v, causal, upcast=False)
@@ -94,33 +114,44 @@ def test_attention_splitkv(B, H, M, N, D, causal, stride_order, dtype, scale, de
 
 @pytest.mark.parametrize('device_id', list(range(torch.cuda.device_count())))
 @pytest.mark.parametrize('scale', [1.0, 2.0, 3.0, 4.0])
-@pytest.mark.parametrize('B, H, M, N, D', [
-    (2, 4, 512, 612, 128),
-    (2, 4, 1024, 1034, 64),
-    (2, 4, 2048, 2048, 32),
-    (2, 4, 4096, 4096, 16),
-    (2, 4, 4001, 4001, 32),
-    (2, 4, 4001, 4096, 64),
-    (2, 4, 4096, 4001, 128),
-    (1, 2, 8192, 8202, 16),
-    (1, 2, 8192, 8192, 32),
-    (2, 4, 10006, 10, 128),
+@pytest.mark.parametrize('B, Hq, Hk, M, N, D', [
+    (2, 4, 4, 512, 612, 128),
+    (2, 4, 4, 1024, 1034, 64),
+    (2, 4, 4, 2048, 2048, 32),
+    (2, 4, 4, 4096, 4096, 16),
+    (2, 4, 4, 4001, 4001, 32),
+    (2, 4, 4, 4001, 4096, 64),
+    (2, 4, 4, 4096, 4001, 128),
+    (1, 2, 2, 8192, 8202, 16),
+    (1, 2, 2, 8192, 8192, 32),
+    (2, 4, 4, 10006, 10, 128),
+    # test for mqa/gqa
+    (2, 4, 2, 512, 612, 128),
+    (2, 4, 1, 1024, 1034, 64),
+    (2, 4, 2, 2048, 2048, 32),
+    (2, 4, 1, 4096, 4096, 16),
+    (2, 4, 2, 4001, 4001, 32),
+    (2, 4, 1, 4001, 4096, 64),
+    (2, 4, 2, 4096, 4001, 128),
+    (1, 2, 1, 8192, 8202, 16),
+    (1, 2, 1, 8192, 8192, 32),
+    (2, 4, 2, 10006, 10, 128),
 ])
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize('stride_order', ['BHTD', 'BTHD'])
-def test_attention_bwd(B, H, M, N, D, causal, stride_order, dtype, scale, device_id):
+def test_attention_bwd(B, Hq, Hk, M, N, D, causal, stride_order, dtype, scale, device_id):
     device = f"cuda:{device_id}"
     if stride_order == "BHTD":
-        q = torch.empty((B, H, M, D), dtype=dtype, device=device).normal_(mean=0., std=scale).requires_grad_()
-        k = torch.empty((B, H, N, D), dtype=dtype, device=device).normal_(mean=0., std=scale).requires_grad_()
-        v = torch.empty((B, H, N, D), dtype=dtype, device=device).normal_(mean=0., std=scale).requires_grad_()
-        do = torch.randn((B, H, M, D), dtype=dtype, device=device)
+        q = torch.empty((B, Hq, M, D), dtype=dtype, device=device).normal_(mean=0., std=scale).requires_grad_()
+        k = torch.empty((B, Hk, N, D), dtype=dtype, device=device).normal_(mean=0., std=scale).requires_grad_()
+        v = torch.empty((B, Hk, N, D), dtype=dtype, device=device).normal_(mean=0., std=scale).requires_grad_()
+        do = torch.randn((B, Hq, M, D), dtype=dtype, device=device)
     else:
-        q = torch.empty((B, M, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2).requires_grad_()
-        k = torch.empty((B, N, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2).requires_grad_()
-        v = torch.empty((B, N, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2).requires_grad_()
-        do = torch.randn((B, M, H, D), dtype=dtype, device=device).transpose(1, 2)
+        q = torch.empty((B, M, Hq, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2).requires_grad_()
+        k = torch.empty((B, N, Hk, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2).requires_grad_()
+        v = torch.empty((B, N, Hk, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2).requires_grad_()
+        do = torch.randn((B, M, Hq, D), dtype=dtype, device=device).transpose(1, 2)
 
     o_ref = flag_attn.testing.flash_attention(q, k, v, causal=causal, upcast=True)
     o_torch = flag_attn.testing.flash_attention(q, k, v, causal=causal, upcast=False)

@@ -232,21 +232,24 @@ def attention(q, k, v, causal=False, sm_scale=None,
     An implementation of FlashAttention v2(https://arxiv.org/abs/2307.08691).
 
     Arguments:
-        q(torch.Tensor): The first queries. The shape is (batch_size, nheads, seqlen_q, headdim).
-        k(torch.Tensor): The first keys. The shape is (batch_size, nheads, seqlen_k, headdim).
-        v(torch.Tensor): The values. The shape is (batch_size, nheads, seqlen_k, headdim).
+        q(torch.Tensor): The first queries. The shape is (batch_size, num_heads_q, seqlen_q, headdim).
+        k(torch.Tensor): The first keys. The shape is (batch_size, num_heads_k, seqlen_k, headdim).
+        v(torch.Tensor): The values. The shape is (batch_size, num_heads_k, seqlen_k, headdim).
         causal(bool): Whether causal masking is applied to attention scores before applying softmax.
         sm_scale(float): The scaling of attention scores before applying softmax.
         return_log_normalizer(bool): Whether to return the log normalizer of softmax inside attention.
         return_total_attention(bool): Whether to return the sum of attention along q's sequence dimendion.
 
     Returns:
-        out(torch.Tensor): The output. The shape is (batch_size, nheads, seqlen_q, headdim).
+        out(torch.Tensor): The output. The shape is (batch_size, num_heads_q, seqlen_q, headdim).
 
         If `return_log_normalizer` or `return_total_attention`, return the following results in addition.
 
-        log_normalizer(torch.Tensor): The log normalizer. The shape is (batch_size, nheads, seqlen_q).
-        total_attention(torch.Tensor): The total attention. The shape is (batch_size, nheads, seqlen_k).
+        log_normalizer(torch.Tensor): The log normalizer. The shape is (batch_size, num_heads_q, seqlen_q).
+        total_attention(torch.Tensor): The total attention. The shape is (batch_size, num_heads_q, seqlen_k).
+
+    Notes:
+        `num_heads_q` must be a multiple of `num_heads_k`.
     """
     return FlashAttention.apply(q, k, v, causal, sm_scale, return_log_normalizer, return_total_attention)
 
