@@ -190,3 +190,43 @@ def test_attention_with_aux_outs(B, H, M, N, D, causal, stride_order, dtype, sca
     triton_max_diff = max_diff(tot_attn_hyp, tot_attn_ref)
     assert triton_max_diff <= 2 * torch_max_diff + 1e-5
 
+
+@pytest.mark.parametrize('device_id', list(range(torch.cuda.device_count())))
+@pytest.mark.parametrize('scale', [1.0, 2.0])
+@pytest.mark.parametrize('B, H, M, N, D', [
+    (2, 4, 512, 612, 128),
+    (2, 4, 1024, 1034, 64),
+    (2, 4, 2048, 2048, 32),
+    # (2, 4, 4096, 4096, 16),
+    # (2, 4, 4001, 4001, 32),
+    # (2, 4, 4001, 4096, 64),
+    # (2, 4, 4096, 4000, 128),
+    # (1, 2, 8192, 8202, 16),
+    # (1, 2, 8192, 8192, 32),
+])
+@pytest.mark.parametrize('causal', [False, True])
+@pytest.mark.parametrize('dropout_p', [0.5, 0.8])
+@pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize('stride_order', ['BHTD'])
+def test_attention_dropout(B, H, M, N, D, causal, dropout_p, stride_order, dtype, scale, device_id):
+    device = f"cuda:{device_id}"
+    if stride_order == "BHTD":
+        q = torch.empty((B, H, M, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
+        k = torch.empty((B, H, N, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
+        v = torch.empty((B, H, N, D), dtype=dtype, device=device).normal_(mean=0., std=scale)
+    else:
+        q = torch.empty((B, M, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
+        k = torch.empty((B, N, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
+        v = torch.empty((B, N, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
+
+    from flag_attn.dropout import dropout_mask
+    o_hyp, p_hyp, _, _, seed, offset = flag_attn.flash_attention(q, k, v, causal, dropout_p=dropout_p, return_seed_offset=True)
+    mask = dropout_mask(q, B, H, M, N, dropout_p, seed, offset)
+    o_ref, P_ref, P_dropout_ref = flag_attn.testing.flash_attention(q, k, v, causal, dropout_p=dropout_p, dropout_mask=mask, upcast=True)
+    o_torch, P_torch, P_dropout_torch = flag_attn.testing.flash_attention(q, k, v, causal, dropout_p=dropout_p, dropout_mask=mask, upcast=False)
+
+    torch_max_diff = max_diff(o_torch, o_ref)
+    triton_max_diff = max_diff(o_hyp, o_ref)
+    report("o hyp", o_hyp, o_ref)
+    report("o torch", o_torch, o_ref)
+    assert triton_max_diff <= 2 * torch_max_diff + 1e-5

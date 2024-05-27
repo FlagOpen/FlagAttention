@@ -13,7 +13,10 @@ __all__ = ["attention"]
 # --------------------------- public API ---------------------------
 class FlashAttention(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q, k, v, causal, sm_scale, dropout_p, return_log_normalizer, return_total_attention):
+    def forward(ctx, q, k, v, causal, sm_scale, dropout_p,
+                return_log_normalizer=False,
+                return_total_attention=False,
+                return_seed_offset=False):
         Dq, Dk, Dv = q.shape[-1], k.shape[-1], v.shape[-1]
         assert Dq == Dk == Dv
         assert Dk in {16, 32, 64, 128}
@@ -53,8 +56,10 @@ class FlashAttention(torch.autograd.Function):
                 grid = (triton.cdiv(M, BLOCK_M), H, B)
                 o = torch.empty_like(q)
                 L = torch.empty((B, H, M), device=q.device, dtype=torch.float32)
+                p = torch.empty((B, H, M, N), device=q.device, dtype=torch.float32)
                 _fwd_kernel[grid](
                     q, k, v,
+                    p,
                     sm_scale,
                     dropout_p, seed, offset,
                     L, o,
@@ -69,6 +74,7 @@ class FlashAttention(torch.autograd.Function):
                     num_warps=num_warps, num_stages=num_stages,
                 )
             else: # split kv
+                assert not is_dropout, "Cannot apply dropout with splitkv yet."
                 BLOCK_M, BLOCK_N, num_stages, num_warps = config_for_split_kv
 
                 divisible_m = M % BLOCK_M == 0
@@ -132,15 +138,18 @@ class FlashAttention(torch.autograd.Function):
         ctx.seed = seed
         ctx.offset = offset
 
-        has_extra_return = return_log_normalizer or return_total_attention
+        has_extra_return = True in (return_log_normalizer, return_total_attention, return_seed_offset)
         if has_extra_return:
             outs = (
                 o,
+                p,
                 L if return_log_normalizer else None,
-                tot_attn if return_total_attention else None
+                tot_attn if return_total_attention else None,
+                seed if return_seed_offset else None,
+                offset if return_seed_offset else None
             )
             return outs
-        return o
+        return o, p
 
     @staticmethod
     def backward(ctx, do, *ignored):
@@ -232,11 +241,11 @@ class FlashAttention(torch.autograd.Function):
                 num_stages=num_stages, num_warps = num_warps,
             )
 
-        return dq, dk, dv, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None
 
 
 def attention(q, k, v, causal=False, sm_scale=None, dropout_p=0.0,
-              return_log_normalizer=False, return_total_attention=False,
+              return_log_normalizer=False, return_total_attention=False, return_seed_offset=False
 ):
     """
     An implementation of FlashAttention v2(https://arxiv.org/abs/2307.08691).
@@ -259,7 +268,7 @@ def attention(q, k, v, causal=False, sm_scale=None, dropout_p=0.0,
         log_normalizer(torch.Tensor): The log normalizer. The shape is (batch_size, nheads, seqlen_q).
         total_attention(torch.Tensor): The total attention. The shape is (batch_size, nheads, seqlen_k).
     """
-    return FlashAttention.apply(q, k, v, causal, sm_scale, dropout_p, return_log_normalizer, return_total_attention)
+    return FlashAttention.apply(q, k, v, causal, sm_scale, dropout_p, return_log_normalizer, return_total_attention, return_seed_offset)
 
 
 # --------------------------- Forward ---------------------------
@@ -300,7 +309,7 @@ def get_fwd_config(B, H, M, N, D, causal):
 
 @triton.jit
 def _fwd_kernel(
-    Q, K, V,
+    Q, K, V, P,
     sm_scale,
     dropout_p,
     seed,
@@ -344,6 +353,7 @@ def _fwd_kernel(
         offs_rng_base = offset + rowblock_base
         offs_rng_base += tl.arange(0, BLOCK_M)[:, None] * N
         offs_rng_base += tl.arange(0, BLOCK_N)[None, :]
+        p_base = rowblock_base + tl.arange(0, BLOCK_M)[:, None] * N + tl.arange(0, BLOCK_N)[None, :]
 
     # initialize pointers to value-like data
     q_ptrs = Q + (offs_m[:, None] * stride_qm + offs_k[None, :] * stride_qk) # (BLOCK_M, BLOCK_DMODEL)
@@ -394,6 +404,8 @@ def _fwd_kernel(
     offs_n_init = offs_n_base
     k_ptrs = K + (offs_k[:, None] * stride_vk + offs_n_init[None, :] * stride_vn) # (BLOCK_DMODEL, BLOCK_N)
     v_ptrs = V + (offs_n_init[:, None] * stride_kn + offs_k[None, :] * stride_kk) # (BLOCK_N, BLOCK_DMODEL)
+    p_ptrs = P + offs_n_init
+    p_out = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
     for start_n in range(0, hi, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         offs_n = start_n + offs_n_base
@@ -408,6 +420,7 @@ def _fwd_kernel(
             v = tl.load(v_ptrs, mask=mask_n[:, None], cache_modifier=".cg")
 
         # -- compute dropout mask --
+        
 
         # -- compute qk ---
         s = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
@@ -425,18 +438,22 @@ def _fwd_kernel(
         alpha = tl.math.exp2((m_i - m_i_new) * qk_scale)
         p = tl.math.exp2(s * qk_scale - m_i_new[:, None] * qk_scale)
 
+        p_sum = tl.sum(p, 1)
         # -- apply dropout --
         if IS_DROPOUT:
             offs_rng = start_n + offs_rng_base
             pmask = tl.rand(seed, offs_rng, n_rounds=6) > dropout_p
-            p *= pmask
+            p *= pmask.to(tl.float32)
+            p_out = p
+            # mask_n = offs_n < N
+            # tl.store(P + p_base + start_n, p, mask=mask_n[None, :])
 
         # -- scale and update acc: acc *= alpha[:, None]--
         acc *= alpha[:, None]
         acc += tl.dot(p.to(input_dtype), v)
 
         # -- update m_i and l_i --
-        l_i = l_i * alpha + tl.sum(p, 1)
+        l_i = l_i * alpha + p_sum
         m_i = m_i_new
         # update pointers
         k_ptrs += BLOCK_N * stride_kn
@@ -453,6 +470,8 @@ def _fwd_kernel(
 
     # -- scale o due to dropout
     if IS_DROPOUT:
+        mask_n = offs_n_base < N
+        tl.store(P + p_base, p_out / l_i[:, None], mask=mask_n[None, :])
         scale = 1.0 / (1.0 - dropout_p)
         acc *= scale
 
