@@ -43,22 +43,18 @@ def attention(q,
     if return_total_attention:
         tot_attn = torch.sum(P, dim=-2)
 
-    # Applies dropout
+    # Applies dropout 
     dropout_scaling = 1.0 / (1 - dropout_p)
     if dropout_mask is not None:
-        P_dropout = P.masked_fill(~dropout_mask, 0.0)
-        # P = P.masked_fill(~dropout_mask, 0.0)
+        P = P.masked_fill(~dropout_mask, 0.0)
 
-    # attn_output = torch.matmul(P.to(v.dtype), v * dropout_scaling).to(input_dtype)
-    attn_output = torch.matmul(P_dropout.to(v.dtype), v * dropout_scaling).to(input_dtype)
+    attn_output = torch.matmul(P.to(v.dtype), v * dropout_scaling).to(input_dtype)
 
     has_extra_return = return_log_normalizer or return_total_attention
     if has_extra_return:
         outs = (attn_output,
-                P,
-                P_dropout,
                 log_normalizer if return_log_normalizer else None,
                 tot_attn if return_total_attention else None)
         return outs
     else:
-        return attn_output, P, P_dropout
+        return attn_output

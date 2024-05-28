@@ -59,7 +59,6 @@ class FlashAttention(torch.autograd.Function):
                 p = torch.empty((B, H, M, N), device=q.device, dtype=torch.float32)
                 _fwd_kernel[grid](
                     q, k, v,
-                    p,
                     sm_scale,
                     dropout_p, seed, offset,
                     L, o,
@@ -142,14 +141,13 @@ class FlashAttention(torch.autograd.Function):
         if has_extra_return:
             outs = (
                 o,
-                p,
                 L if return_log_normalizer else None,
                 tot_attn if return_total_attention else None,
                 seed if return_seed_offset else None,
                 offset if return_seed_offset else None
             )
             return outs
-        return o, p
+        return o
 
     @staticmethod
     def backward(ctx, do, *ignored):
@@ -309,7 +307,7 @@ def get_fwd_config(B, H, M, N, D, causal):
 
 @triton.jit
 def _fwd_kernel(
-    Q, K, V, P,
+    Q, K, V,
     sm_scale,
     dropout_p,
     seed,
@@ -404,8 +402,6 @@ def _fwd_kernel(
     offs_n_init = offs_n_base
     k_ptrs = K + (offs_k[:, None] * stride_vk + offs_n_init[None, :] * stride_vn) # (BLOCK_DMODEL, BLOCK_N)
     v_ptrs = V + (offs_n_init[:, None] * stride_kn + offs_k[None, :] * stride_kk) # (BLOCK_N, BLOCK_DMODEL)
-    p_ptrs = P + offs_n_init
-    p_out = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
     for start_n in range(0, hi, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         offs_n = start_n + offs_n_base
@@ -419,9 +415,6 @@ def _fwd_kernel(
             k = tl.load(k_ptrs, mask=mask_n[None, :], cache_modifier=".cg")
             v = tl.load(v_ptrs, mask=mask_n[:, None], cache_modifier=".cg")
 
-        # -- compute dropout mask --
-        
-
         # -- compute qk ---
         s = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         s += tl.dot(q, k)
@@ -432,21 +425,19 @@ def _fwd_kernel(
             causal_mask = (P_SEQ + offs_m[:, None]) >= offs_n[None, :]
             s = tl.where(causal_mask, s, float("-inf"))
 
-
         # -- compute scaling constant ---
         m_i_new = tl.maximum(m_i, tl.max(s, 1))
         alpha = tl.math.exp2((m_i - m_i_new) * qk_scale)
         p = tl.math.exp2(s * qk_scale - m_i_new[:, None] * qk_scale)
 
+        # -- compute partial sumexpn before applying dropout
         p_sum = tl.sum(p, 1)
+
         # -- apply dropout --
         if IS_DROPOUT:
             offs_rng = start_n + offs_rng_base
             pmask = tl.rand(seed, offs_rng, n_rounds=6) > dropout_p
             p *= pmask.to(tl.float32)
-            p_out = p
-            # mask_n = offs_n < N
-            # tl.store(P + p_base + start_n, p, mask=mask_n[None, :])
 
         # -- scale and update acc: acc *= alpha[:, None]--
         acc *= alpha[:, None]
@@ -470,8 +461,6 @@ def _fwd_kernel(
 
     # -- scale o due to dropout
     if IS_DROPOUT:
-        mask_n = offs_n_base < N
-        tl.store(P + p_base, p_out / l_i[:, None], mask=mask_n[None, :])
         scale = 1.0 / (1.0 - dropout_p)
         acc *= scale
 
