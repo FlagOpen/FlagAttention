@@ -206,7 +206,7 @@ def test_attention_with_aux_outs(B, H, M, N, D, causal, stride_order, dtype, sca
 
     o_ref, log_norm_ref, tot_attn_ref = flag_attn.testing.flash_attention(q, k, v, causal, return_log_normalizer=True, return_total_attention=True, upcast=True)
     o_torch, log_norm_torch, tot_attn_torch = flag_attn.testing.flash_attention(q, k, v, causal, return_log_normalizer=True, return_total_attention=True, upcast=False)
-    o_hyp, log_norm_hyp, tot_attn_hyp = flag_attn.flash_attention(q, k, v, causal, return_log_normalizer=True, return_total_attention=True)
+    o_hyp, log_norm_hyp, tot_attn_hyp, *_ = flag_attn.flash_attention(q, k, v, causal, return_log_normalizer=True, return_total_attention=True)
 
 
     torch_max_diff = max_diff(o_torch, o_ref)

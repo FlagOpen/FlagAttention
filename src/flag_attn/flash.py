@@ -717,7 +717,7 @@ def _bwd_kv_kernel(
         if IS_DROPOUT:
             dv += tl.dot(tl.trans(p_masked), do) * rp # (BLOCK_N, BLOCK_DMODEL)  # still correct
         else:
-            dv += tl.dot(tl.trans(p), do) # (BLOCK_N, BLOCK_DMODEL)  # still correct
+            dv += tl.dot(tl.trans(p).to(input_dtype), do) # (BLOCK_N, BLOCK_DMODEL)  # still correct
 
         # compute dp = dot(v, do)
         if DIVISIBLE_M:
