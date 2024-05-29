@@ -14,6 +14,10 @@ def total_attention(q, k, l, causal=False, sm_scale=None):
 
     B, H, M, D = q.shape
     N = k.shape[2]
+    Hk = k.shape[1]
+    assert H % Hk == 0, "number of heads in q must be a multiple of that in k"
+    num_groups = H // Hk
+
     P_SEQ = N - M
 
     if sm_scale is None:
@@ -34,7 +38,7 @@ def total_attention(q, k, l, causal=False, sm_scale=None):
             q, k, l, tot_attn, sm_scale,
             q.stride(0), q.stride(1), q.stride(2), q.stride(3),
             k.stride(0), k.stride(1), k.stride(2), k.stride(3),
-            B, H, M, N, P_SEQ,
+            B, H, M, N, P_SEQ, num_groups,
             BLOCK_M=BLOCK_M, BLOCK_DMODEL=D, BLOCK_N=BLOCK_N,
             CAUSAL=causal,
             DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
@@ -48,7 +52,7 @@ def _total_attention_kernel(
     Q, K, L, TA, sm_scale,
     stride_qz, stride_qh, stride_qm, stride_qk,
     stride_kz, stride_kh, stride_kn, stride_kk,
-    Z, H, M, N, P_SEQ,
+    Z, H, M, N, P_SEQ, num_groups,
     BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr,
     CAUSAL: tl.constexpr,
     DIVISIBLE_M: tl.constexpr, DIVISIBLE_N: tl.constexpr,
@@ -61,8 +65,9 @@ def _total_attention_kernel(
     qk_scale = sm_scale * log2e
 
     # offset pointers for (batch, head)
+    off_hk = off_h // num_groups
     Q += off_z * stride_qz + off_h * stride_qh
-    K += off_z * stride_kz + off_h * stride_kh
+    K += off_z * stride_kz + off_hk * stride_kh
     L += (off_z * H + off_h) * M
     TA += (off_z * H + off_h) * N # (b, h, n)
 

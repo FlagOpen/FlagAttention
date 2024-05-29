@@ -28,7 +28,9 @@ def dropout_mask_kernel(dropout_mask, B, H, M, N, dropout_p, seed, offset):
         tl.store(dropout_mask + offs, pmask, mask=row_mask)
 
 def dropout_mask(x, B, H, M, N, dropout_p, seed, offset):
-    dropout_mask = torch.empty((B, H, M, N), dtype=torch.bool, device=x.device)
+    dropout_mask = torch.full((B, H, M, N), True, dtype=torch.bool, device=x.device)
+    if dropout_p == 0:
+        return dropout_mask
     grid = (M, B, H)
     dropout_mask_kernel[grid](dropout_mask, B, H, M, N, dropout_p, seed, offset)
     return dropout_mask
