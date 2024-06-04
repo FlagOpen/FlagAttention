@@ -43,19 +43,20 @@ class FlashAttention(torch.autograd.Function):
         # contiguity
         q, k, v = maybe_contiguous(q), maybe_contiguous(k), maybe_contiguous(v)
 
-        # Dropout preparation.
-        is_dropout = dropout_p > 0
-        if is_dropout:
-            offset_increment = B * H * M * N
-            seed, offset = philox_cuda_seed_offset(offset_increment)
-        else:
-            seed, offset = 0, 0
 
         # to work around https://github.com/openai/triton/issues/2441
         device = torch.cuda.device_of(q)
         num_sms = torch.cuda.get_device_properties(device).multi_processor_count
 
         with torch.cuda.device(device):
+            # Dropout preparation.
+            is_dropout = dropout_p > 0
+            if is_dropout:
+                offset_increment = B * H * M * N
+                seed, offset = philox_cuda_seed_offset(offset_increment)
+            else:
+                seed, offset = 0, 0
+
             config_for_split_kv = get_fwd_config_kv_split(B, H, M, N, D, causal)
             S = num_splits_herustic(B, H, M, N, config_for_split_kv[0], config_for_split_kv[1], num_sms, 128)
             split_kv: bool = S > 1
@@ -71,7 +72,6 @@ class FlashAttention(torch.autograd.Function):
                 grid = (triton.cdiv(M, BLOCK_M), H, B)
                 o = torch.empty_like(q)
                 L = torch.empty((B, H, M), device=q.device, dtype=torch.float32)
-                p = torch.empty((B, H, M, N), device=q.device, dtype=torch.float32)
                 _fwd_kernel[grid](
                     q, k, v,
                     sm_scale,
@@ -378,7 +378,6 @@ def _fwd_kernel(
         offs_rng_base = offset + rowblock_base
         offs_rng_base += tl.arange(0, BLOCK_M)[:, None] * N
         offs_rng_base += tl.arange(0, BLOCK_N)[None, :]
-        p_base = rowblock_base + tl.arange(0, BLOCK_M)[:, None] * N + tl.arange(0, BLOCK_N)[None, :]
 
     # initialize pointers to value-like data
     q_ptrs = Q + (offs_m[:, None] * stride_qm + offs_k[None, :] * stride_qk) # (BLOCK_M, BLOCK_DMODEL)
@@ -566,7 +565,7 @@ def _bwd_preprocess(
 
     # compute
     delta = tl.sum(o * do, axis=1)
-    
+
     # (NOTE) dropout scaling doesn't affect delta's value
     # when dropout is applied, o and do are actually scaled.
     # original_o equals o times reverse scale while original_do is do times scale,

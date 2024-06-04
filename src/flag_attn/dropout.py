@@ -32,6 +32,6 @@ def dropout_mask(x, B, H, M, N, dropout_p, seed, offset):
     if dropout_p == 0:
         return dropout_mask
     grid = (M, B, H)
-    dropout_mask_kernel[grid](dropout_mask, B, H, M, N, dropout_p, seed, offset)
+    with torch.cuda.device(x.device):
+        dropout_mask_kernel[grid](dropout_mask, B, H, M, N, dropout_p, seed, offset)
     return dropout_mask
-

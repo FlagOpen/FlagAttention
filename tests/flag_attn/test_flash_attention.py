@@ -295,7 +295,7 @@ def test_attention_bwd_dropout(B, H, M, N, D, causal, dropout_p, stride_order, d
         v = torch.empty((B, N, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2).requires_grad_()
         do = torch.randn((B, M, H, D), dtype=dtype, device=device).transpose(1, 2)
 
-    
+
     from flag_attn.dropout import dropout_mask
     # from flag_attn.dropout import philox_cuda_seed_offset
     # philox_cuda_seed_offset(increment)
