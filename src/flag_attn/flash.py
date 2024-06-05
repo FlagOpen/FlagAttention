@@ -6,6 +6,8 @@ from flag_attn.total import _total_attention_kernel
 from flag_attn.split_kv import _fwd_split_kv_kernel, _fwd_combine_kv_splits, num_splits_herustic
 from flag_attn.split_kv import get_fwd_config as get_fwd_config_kv_split
 
+from .dropout import philox_cuda_seed_offset
+
 __all__ = ["attention"]
 
 
@@ -20,8 +22,7 @@ def rounded_multiple(a, b):
 # --------------------------- public API ---------------------------
 class FlashAttention(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q, k, v, causal, sm_scale, return_log_normalizer, return_total_attention):
-        # size, stride, dtype checking
+    def forward(ctx, q, k, v, causal, sm_scale, dropout_p, return_log_normalizer, return_total_attention, return_seed_offset):
         Dq, Dk, Dv = q.shape[-1], k.shape[-1], v.shape[-1]
         assert Dq == Dk == Dv, "feature size of q, k, v should be equal"
         assert Dk in {16, 32, 64, 128}
@@ -47,6 +48,14 @@ class FlashAttention(torch.autograd.Function):
         num_sms = torch.cuda.get_device_properties(device).multi_processor_count
 
         with torch.cuda.device(device):
+            # Dropout preparation.
+            is_dropout = dropout_p > 0
+            if is_dropout:
+                offset_increment = B * H * M * N
+                seed, offset = philox_cuda_seed_offset(offset_increment)
+            else:
+                seed, offset = 0, 0
+
             config_for_split_kv = get_fwd_config_kv_split(B, H, M, N, D, causal)
             S = num_splits_herustic(B, H, M, N, config_for_split_kv[0], config_for_split_kv[1], num_sms, 128)
             split_kv: bool = S > 1
@@ -64,6 +73,7 @@ class FlashAttention(torch.autograd.Function):
                 L = torch.empty((B, H, M), device=q.device, dtype=torch.float32)
                 _fwd_kernel[grid](
                     q, k, v, sm_scale,
+                    dropout_p, seed, offset,
                     L, o,
                     q.stride(0), q.stride(1), q.stride(2), q.stride(3),
                     k.stride(0), k.stride(1), k.stride(2), k.stride(3),
@@ -71,11 +81,12 @@ class FlashAttention(torch.autograd.Function):
                     o.stride(0), o.stride(1), o.stride(2), o.stride(3),
                     B, H, M, N, P_SEQ, num_groups,
                     BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_DMODEL=D,
-                    IS_CAUSAL=causal, LARGER_M=larger_m,
+                    IS_CAUSAL=causal, IS_DROPOUT=is_dropout, LARGER_M=larger_m,
                     DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
                     num_warps=num_warps, num_stages=num_stages,
                 )
             else: # split kv
+                assert not is_dropout, "Cannot apply dropout with splitkv."
                 BLOCK_M, BLOCK_N, num_stages, num_warps = config_for_split_kv
 
                 divisible_m = M % BLOCK_M == 0
@@ -132,13 +143,18 @@ class FlashAttention(torch.autograd.Function):
         ctx.save_for_backward(q, k, v, o, L)
         ctx.sm_scale = sm_scale
         ctx.causal = causal
+        ctx.dropout_p = dropout_p
+        ctx.seed = seed
+        ctx.offset = offset
 
-        has_extra_return = return_log_normalizer or return_total_attention
+        has_extra_return = True in (return_log_normalizer, return_total_attention, return_seed_offset)
         if has_extra_return:
             outs = (
                 o,
                 L if return_log_normalizer else None,
-                tot_attn if return_total_attention else None
+                tot_attn if return_total_attention else None,
+                seed if is_dropout and return_seed_offset else None,
+                offset if is_dropout and return_seed_offset else None
             )
             return outs
         return o
@@ -148,6 +164,10 @@ class FlashAttention(torch.autograd.Function):
         q, k, v, o, L = ctx.saved_tensors
         sm_scale = ctx.sm_scale
         causal = ctx.causal
+        dropout_p = ctx.dropout_p
+        is_dropout = ctx.dropout_p > 0
+        seed = ctx.seed
+        offset = ctx.offset
 
         B, H, M, D = q.shape
         N = k.shape[2]
@@ -189,6 +209,9 @@ class FlashAttention(torch.autograd.Function):
                 q, k, v, sm_scale, do,
                 dk, dv,
                 L, delta,
+                dropout_p,
+                seed,
+                offset,
                 q.stride(0), q.stride(1), q.stride(2), q.stride(3),
                 k.stride(0), k.stride(1), k.stride(2), k.stride(3),
                 v.stride(0), v.stride(1), v.stride(2), v.stride(3),
@@ -198,6 +221,7 @@ class FlashAttention(torch.autograd.Function):
                 B, H, M, N, P_SEQ,
                 num_groups,
                 BLOCK_M=BLOCK_M, BLOCK_DMODEL=D, BLOCK_N=BLOCK_N, CAUSAL=causal,
+                IS_DROPOUT=is_dropout,
                 DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
                 num_stages=num_stages, num_warps=num_warps,
             )
@@ -208,6 +232,9 @@ class FlashAttention(torch.autograd.Function):
                 q, k, v, sm_scale, do,
                 dq,
                 L, delta,
+                dropout_p,
+                seed,
+                offset,
                 q.stride(0), q.stride(1), q.stride(2), q.stride(3),
                 k.stride(0), k.stride(1), k.stride(2), k.stride(3),
                 v.stride(0), v.stride(1), v.stride(2), v.stride(3),
@@ -216,17 +243,17 @@ class FlashAttention(torch.autograd.Function):
                 B, H, M, N, P_SEQ,
                 num_groups,
                 BLOCK_M=BLOCK_M, BLOCK_DMODEL=D, BLOCK_N=BLOCK_N,
-                CAUSAL=causal, LARGER_M=larger_m,
+                CAUSAL=causal, IS_DROPOUT=is_dropout, LARGER_M=larger_m,
                 DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
                 num_stages=num_stages, num_warps = num_warps,
             )
             dk = dk.reshape((B, Hk, num_groups, N, D)).sum(2)
             dv = dv.reshape((B, Hk, num_groups, N, D)).sum(2)
-        return dq, dk, dv, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None
 
 
-def attention(q, k, v, causal=False, sm_scale=None,
-              return_log_normalizer=False, return_total_attention=False,
+def attention(q, k, v, causal=False, sm_scale=None, dropout_p=0.0,
+              return_log_normalizer=False, return_total_attention=False, return_seed_offset=False
 ):
     """
     An implementation of FlashAttention v2(https://arxiv.org/abs/2307.08691).
@@ -237,21 +264,26 @@ def attention(q, k, v, causal=False, sm_scale=None,
         v(torch.Tensor): The values. The shape is (batch_size, num_heads_k, seqlen_k, headdim).
         causal(bool): Whether causal masking is applied to attention scores before applying softmax.
         sm_scale(float): The scaling of attention scores before applying softmax.
+        dropout_p(float): Dropout probability.
         return_log_normalizer(bool): Whether to return the log normalizer of softmax inside attention.
         return_total_attention(bool): Whether to return the sum of attention along q's sequence dimendion.
+        return_seed_offset(bool): Whether to return dropout seed and offset
 
     Returns:
         out(torch.Tensor): The output. The shape is (batch_size, num_heads_q, seqlen_q, headdim).
 
-        If `return_log_normalizer` or `return_total_attention`, return the following results in addition.
+        If `return_log_normalizer` or `return_total_attention` or `return_seed_offset` is True,
+            return the following results in addition.
 
         log_normalizer(torch.Tensor): The log normalizer. The shape is (batch_size, num_heads_q, seqlen_q).
         total_attention(torch.Tensor): The total attention. The shape is (batch_size, num_heads_q, seqlen_k).
+        seed(int): The Philox seed used in dropout.
+        offset(int): The starting Philox offset used in dropout.
 
     Notes:
         `num_heads_q` must be a multiple of `num_heads_k`.
     """
-    return FlashAttention.apply(q, k, v, causal, sm_scale, return_log_normalizer, return_total_attention)
+    return FlashAttention.apply(q, k, v, causal, sm_scale, dropout_p, return_log_normalizer, return_total_attention, return_seed_offset)
 
 
 # --------------------------- Forward ---------------------------
@@ -293,6 +325,9 @@ def get_fwd_config(B, H, M, N, D, causal):
 @triton.jit
 def _fwd_kernel(
     Q, K, V, sm_scale,
+    dropout_p,
+    seed,
+    offset,
     L, O,
     stride_qz, stride_qh, stride_qm, stride_qk,
     stride_kz, stride_kh, stride_kn, stride_kk,
@@ -301,7 +336,7 @@ def _fwd_kernel(
     Z, H, M, N, P_SEQ,
     num_groups,
     BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr,
-    IS_CAUSAL: tl.constexpr, LARGER_M: tl.constexpr,
+    IS_CAUSAL: tl.constexpr, IS_DROPOUT: tl.constexpr, LARGER_M: tl.constexpr,
     DIVISIBLE_M: tl.constexpr, DIVISIBLE_N: tl.constexpr,
 ):
     input_dtype = Q.dtype.element_ty
@@ -328,6 +363,12 @@ def _fwd_kernel(
     offs_m = start_m * BLOCK_M + offs_m_base
     offs_n_base = tl.arange(0, BLOCK_N)
     offs_k = tl.arange(0, BLOCK_DMODEL)
+
+    if IS_DROPOUT:
+        rowblock_base = off_z * H * M * N + off_h * M * N + start_m * BLOCK_M * N
+        offs_rng_base = offset + rowblock_base
+        offs_rng_base += tl.arange(0, BLOCK_M)[:, None] * N
+        offs_rng_base += tl.arange(0, BLOCK_N)[None, :]
 
     # initialize pointers to value-like data
     q_ptrs = Q + (offs_m[:, None] * stride_qm + offs_k[None, :] * stride_qk) # (BLOCK_M, BLOCK_DMODEL)
@@ -406,12 +447,21 @@ def _fwd_kernel(
         alpha = tl.math.exp2((m_i - m_i_new) * qk_scale)
         p = tl.math.exp2(s * qk_scale - m_i_new[:, None] * qk_scale)
 
+        # -- compute partial sumexpn before applying dropout
+        p_sum = tl.sum(p, 1)
+
+        # -- apply dropout --
+        if IS_DROPOUT:
+            offs_rng = start_n + offs_rng_base
+            pmask = tl.rand(seed, offs_rng, n_rounds=6) > dropout_p
+            p *= pmask.to(tl.float32)
+
         # -- scale and update acc: acc *= alpha[:, None]--
         acc *= alpha[:, None]
         acc += tl.dot(p.to(input_dtype), v)
 
         # -- update m_i and l_i --
-        l_i = l_i * alpha + tl.sum(p, 1)
+        l_i = l_i * alpha + p_sum
         m_i = m_i_new
         # update pointers
         k_ptrs += BLOCK_N * stride_kn
@@ -425,6 +475,11 @@ def _fwd_kernel(
     else:
         acc = acc * (1.0 / l_i[:, None])
         l = m_i * sm_scale + tl.log(l_i) # log(normalizer)
+
+    # -- scale o due to dropout
+    if IS_DROPOUT:
+        scale = 1.0 / (1.0 - dropout_p)
+        acc *= scale
 
     if DIVISIBLE_M:
         tl.store(l_ptrs, l, cache_modifier=".cg")
@@ -499,6 +554,12 @@ def _bwd_preprocess(
 
     # compute
     delta = tl.sum(o * do, axis=1)
+
+    # (NOTE) dropout scaling doesn't affect delta's value
+    # when dropout is applied, o and do are actually scaled.
+    # original_o equals o times reverse scale while original_do is do times scale,
+    # and thus delta remains unchanged.
+
     # write-back
     d_ptrs = Delta + off_m * stride_dm
     if DIVISIBLE_M:
@@ -513,6 +574,9 @@ def _bwd_kv_kernel(
     DK, DV,
     L,
     D,
+    dropout_p,
+    seed,
+    offset,
     stride_qz, stride_qh, stride_qm, stride_qk,
     stride_kz, stride_kh, stride_kn, stride_kk,
     stride_vz, stride_vh, stride_vn, stride_vk,
@@ -522,7 +586,7 @@ def _bwd_kv_kernel(
     Z, H, M, N, P_SEQ,
     num_groups,
     BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr,
-    CAUSAL: tl.constexpr,
+    CAUSAL: tl.constexpr, IS_DROPOUT: tl.constexpr,
     DIVISIBLE_M: tl.constexpr, DIVISIBLE_N: tl.constexpr,
 ):
     input_dtype = Q.dtype.element_ty
@@ -577,6 +641,14 @@ def _bwd_kv_kernel(
         v = tl.load(v_ptrs, mask=mask_n[:, None])
         k = tl.load(k_ptrs, mask=mask_n[:, None])
 
+    # dropout
+    if IS_DROPOUT:
+        colblock_base = off_z * H * M * N + off_h * M * N + start_n * BLOCK_N
+        offs_rng_base = offset + colblock_base
+        offs_rng_base += tl.arange(0, BLOCK_M)[:, None] * N
+        offs_rng_base += tl.arange(0, BLOCK_N)[None, :]
+        rp = 1. / (1. - dropout_p)
+
     # initialize dk amd dv
     dk = tl.zeros([BLOCK_N, BLOCK_DMODEL], dtype=tl.float32)
     dv = tl.zeros([BLOCK_N, BLOCK_DMODEL], dtype=tl.float32)
@@ -621,7 +693,19 @@ def _bwd_kv_kernel(
             do = tl.load(do_ptrs)
         else:
             do = tl.load(do_ptrs, mask=mask_m[:, None]) # (BLOCK_M, BLOCK_DMODEL)
-        dv += tl.dot(tl.trans(p.to(do.dtype)), do) # (BLOCK_N, BLOCK_DMODEL)  # still correct
+
+        if IS_DROPOUT:
+            # do *= rp
+            offs_rng = offs_rng_base + start_m * N
+            pmask = tl.rand(seed, offs_rng, n_rounds=6) > dropout_p
+            p_masked = p * pmask
+            p_masked = p_masked.to(input_dtype)
+
+        # -- apply dropout --
+        if IS_DROPOUT:
+            dv += tl.dot(tl.trans(p_masked), do) * rp # (BLOCK_N, BLOCK_DMODEL)  # still correct
+        else:
+            dv += tl.dot(tl.trans(p).to(input_dtype), do) # (BLOCK_N, BLOCK_DMODEL)  # still correct
 
         # compute dp = dot(v, do)
         if DIVISIBLE_M:
@@ -630,6 +714,11 @@ def _bwd_kv_kernel(
             delta = tl.load(D + offs_m, mask=mask_m)
         dp = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         dp += tl.dot(do, tl.trans(v))
+
+        # -- apply dropout --
+        if IS_DROPOUT:
+            dp *= rp
+            dp *= pmask
 
         # compute ds = p * (dp - delta[:, None])
         ds = p * (dp - delta[:, None]) # (BLOCK_M, BLOCK_N)
@@ -662,6 +751,9 @@ def _bwd_q_kernel(
     DQ,
     L,
     D,
+    dropout_p,
+    seed,
+    offset,
     stride_qz, stride_qh, stride_qm, stride_qk,
     stride_kz, stride_kh, stride_kn, stride_kk,
     stride_vz, stride_vh, stride_vn, stride_vk,
@@ -670,7 +762,7 @@ def _bwd_q_kernel(
     Z, H, M, N, P_SEQ,
     num_groups,
     BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr,
-    CAUSAL: tl.constexpr, LARGER_M: tl.constexpr,
+    CAUSAL: tl.constexpr, IS_DROPOUT: tl.constexpr, LARGER_M: tl.constexpr,
     DIVISIBLE_M: tl.constexpr, DIVISIBLE_N: tl.constexpr,
 ):
     input_dtype = Q.dtype.element_ty
@@ -739,6 +831,15 @@ def _bwd_q_kernel(
     else:
         hi = N
 
+    # dropout
+    if IS_DROPOUT:
+        rowblock_base = off_z * H * M * N + off_h * M * N + start_m * BLOCK_M * N
+        offs_rng_base = offset + rowblock_base
+        offs_rng_base += tl.arange(0, BLOCK_M)[:, None] * N
+        offs_rng_base += tl.arange(0, BLOCK_N)[None, :]
+        rp = 1. / (1. - dropout_p)
+        do *= rp.to(do.dtype)
+
     # loop over a row
     for start_n in range(0, hi, BLOCK_N):
         offs_n = start_n + offs_n_base
@@ -772,6 +873,13 @@ def _bwd_q_kernel(
         # compute dp = dot(v, do)
         dp = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         dp += tl.dot(do.to(input_dtype), tl.trans(v))
+
+        if IS_DROPOUT:
+            offs_rng = start_n + offs_rng_base
+            pmask = tl.rand(seed, offs_rng, n_rounds=6) > dropout_p
+            dp *= pmask
+            # p_dropout = p * pmask.to(tl.float32)
+
         # no need to mask dp
         # if CAUSAL:
         #     dp = tl.where(causal_mask & valid_mask, dp, 0.0)

@@ -1,10 +1,13 @@
 import math
 import torch
 
+
 def attention(q,
               k,
               v,
               causal,
+              dropout_p=0.0,
+              dropout_mask=None,
               sm_scale=None,
               return_log_normalizer=False,
               return_total_attention=False,
@@ -49,13 +52,19 @@ def attention(q,
     if return_total_attention:
         tot_attn = torch.sum(P, dim=-2)
 
-    attn_output = torch.matmul(P.to(v.dtype), v).to(input_dtype)
+    # Applies dropout 
+    dropout_scaling = 1.0 / (1 - dropout_p)
+    if dropout_mask is not None:
+        P = P.masked_fill(~dropout_mask, 0.0)
+
+    attn_output = torch.matmul(P.to(v.dtype), v) * dropout_scaling
+    attn_output = attn_output.to(input_dtype)
 
     has_extra_return = return_log_normalizer or return_total_attention
     if has_extra_return:
         outs = (attn_output,
-                 log_normalizer if return_log_normalizer else None,
-                 tot_attn if return_total_attention else None)
+                log_normalizer if return_log_normalizer else None,
+                tot_attn if return_total_attention else None)
         return outs
     else:
         return attn_output

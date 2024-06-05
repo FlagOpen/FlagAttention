@@ -234,11 +234,11 @@ The performance of piecewise_attention has improved compared to that in v0.1. In
 - support computation of total attention of each `k` gets from all `q`'s;
 - supports returning accumulative attention of each keys.
 - supports [MQA](https://arxiv.org/abs/1911.02150) and [GQA](https://arxiv.org/pdf/2305.13245).
+- supports dropout of attention weights.
 
 #### Limitations
 
 - `headdim` should be in `[16, 32, 64, 128]`.
-- dropout of attention weights is not supported yet.
 
 ## TODOs
 
