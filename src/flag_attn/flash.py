@@ -43,7 +43,6 @@ class FlashAttention(torch.autograd.Function):
         # contiguity
         q, k, v = maybe_contiguous(q), maybe_contiguous(k), maybe_contiguous(v)
 
-
         # to work around https://github.com/openai/triton/issues/2441
         device = torch.cuda.device_of(q)
         num_sms = torch.cuda.get_device_properties(device).multi_processor_count
@@ -73,8 +72,7 @@ class FlashAttention(torch.autograd.Function):
                 o = torch.empty_like(q)
                 L = torch.empty((B, H, M), device=q.device, dtype=torch.float32)
                 _fwd_kernel[grid](
-                    q, k, v,
-                    sm_scale,
+                    q, k, v, sm_scale,
                     dropout_p, seed, offset,
                     L, o,
                     q.stride(0), q.stride(1), q.stride(2), q.stride(3),
@@ -99,8 +97,7 @@ class FlashAttention(torch.autograd.Function):
                 grid = (triton.cdiv(M, BLOCK_M), S, H * B)
                 N_SPLIT_SIZE = triton.cdiv(triton.cdiv(N, BLOCK_N), S) * BLOCK_N
                 _fwd_split_kv_kernel[grid](
-                    q, k, v,
-                    sm_scale,
+                    q, k, v, sm_scale,
                     multiple_l, multiple_o,
                     q.stride(0), q.stride(1), q.stride(2), q.stride(3),
                     k.stride(0), k.stride(1), k.stride(2), k.stride(3),
@@ -191,20 +188,15 @@ class FlashAttention(torch.autograd.Function):
             divisible_m = M % BLOCK_M == 0
             divisible_n = N % BLOCK_N == 0
 
-            # reciprocal dropout scale
-            rp = 1 / (1 - dropout_p)
-
             delta = torch.empty_like(L)
             grid = (triton.cdiv(M, BLOCK_M), H, B)
             _bwd_preprocess[grid](
                 o, do,
                 delta,
-                rp,
                 o.stride(0), o.stride(1), o.stride(2), o.stride(3),
                 do.stride(0), do.stride(1), do.stride(2), do.stride(3),
                 delta.stride(0), delta.stride(1), delta.stride(2),
                 M,
-                IS_DROPOUT=is_dropout,
                 BLOCK_M=BLOCK_M, D_HEAD=D,
                 DIVISIBLE_M=divisible_m,
             )
@@ -214,9 +206,8 @@ class FlashAttention(torch.autograd.Function):
             dv = torch.empty((B, H, N, D), dtype=v.dtype, device=q.device)
             grid = (triton.cdiv(N, BLOCK_N), H, B)
             _bwd_kv_kernel[grid](
-                q, k, v,
-                sm_scale,
-                do, dk, dv,
+                q, k, v, sm_scale, do,
+                dk, dv,
                 L, delta,
                 dropout_p,
                 seed,
@@ -229,8 +220,8 @@ class FlashAttention(torch.autograd.Function):
                 dv.stride(0), dv.stride(1), dv.stride(2), dv.stride(3),
                 B, H, M, N, P_SEQ,
                 num_groups,
-                BLOCK_M=BLOCK_M, BLOCK_DMODEL=D, BLOCK_N=BLOCK_N,
-                CAUSAL=causal, IS_DROPOUT=is_dropout,
+                BLOCK_M=BLOCK_M, BLOCK_DMODEL=D, BLOCK_N=BLOCK_N, CAUSAL=causal,
+                IS_DROPOUT=is_dropout,
                 DIVISIBLE_M=divisible_m, DIVISIBLE_N=divisible_n,
                 num_stages=num_stages, num_warps=num_warps,
             )
@@ -281,7 +272,8 @@ def attention(q, k, v, causal=False, sm_scale=None, dropout_p=0.0,
     Returns:
         out(torch.Tensor): The output. The shape is (batch_size, num_heads_q, seqlen_q, headdim).
 
-        If `return_log_normalizer` or `return_total_attention`, return the following results in addition.
+        If `return_log_normalizer` or `return_total_attention` or `return_seed_offset` is True,
+            return the following results in addition.
 
         log_normalizer(torch.Tensor): The log normalizer. The shape is (batch_size, num_heads_q, seqlen_q).
         total_attention(torch.Tensor): The total attention. The shape is (batch_size, num_heads_q, seqlen_k).
@@ -332,8 +324,7 @@ def get_fwd_config(B, H, M, N, D, causal):
 
 @triton.jit
 def _fwd_kernel(
-    Q, K, V,
-    sm_scale,
+    Q, K, V, sm_scale,
     dropout_p,
     seed,
     offset,
@@ -532,13 +523,12 @@ def get_bwd_config(B, H, M, N, D, causal):
 def _bwd_preprocess(
     Out, DO,
     Delta,
-    rp,
     stride_oz, stride_oh, stride_om, stride_ok,
     stride_doz, stride_doh, stride_dom, stride_dok,
     stride_dz, stride_dh, stride_dm,
     M,
     BLOCK_M: tl.constexpr, D_HEAD: tl.constexpr,
-    DIVISIBLE_M: tl.constexpr, IS_DROPOUT
+    DIVISIBLE_M: tl.constexpr,
 ):
     off_h = tl.program_id(1)
     off_z = tl.program_id(2)
@@ -561,7 +551,6 @@ def _bwd_preprocess(
         mask_m = off_m < M
         o = tl.load(o_ptrs, mask=mask_m[:, None]).to(tl.float32)
         do = tl.load(do_ptrs, mask=mask_m[:, None]).to(tl.float32)
-
 
     # compute
     delta = tl.sum(o * do, axis=1)
@@ -863,6 +852,7 @@ def _bwd_q_kernel(
             mask_n = offs_n < N
             v = tl.load(v_ptrs, mask=mask_n[:, None])
             k = tl.load(k_ptrs, mask=mask_n[:, None])
+
 
         # recompute p = softmax(qk * sm_scale, dim=-1)
         if not DIVISIBLE_N:
