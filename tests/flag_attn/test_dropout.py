@@ -1,8 +1,8 @@
 import torch
 import pytest
-from flag_attn.dropout import dropout_mask
+from flag_attn.testing import recompute_mask
 
-@pytest.mark.parametrize('x', [torch.empty(1, device='cuda')])
+
 @pytest.mark.parametrize('B, H, M, N', [
     (2, 4, 512, 612),
     (2, 4, 1024, 1034),
@@ -15,11 +15,12 @@ from flag_attn.dropout import dropout_mask
     (1, 2, 8192, 8192),
 ])
 @pytest.mark.parametrize('p', [0.5, 0.8])
-def test_dropout_mask(x, B, H, M, N, p):
+def test_recompute_mask(B, H, M, N, p):
     import math
     seed = 123456789
     offset = 123456789123456789
-    mask = dropout_mask(x, B, H, M, N, p, seed, offset)
+    device = torch.cuda.current_device()
+    mask = recompute_mask(B, H, M, N, p, seed, offset, device)
     # zeros indicate to drop
     # k follows Binomial distributio B(k; n, p)
     n = mask.numel()

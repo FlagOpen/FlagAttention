@@ -250,9 +250,8 @@ def test_attention_fwd_dropout(B, H, M, N, D, causal, dropout_p, stride_order, d
         k = torch.empty((B, N, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
         v = torch.empty((B, N, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2)
 
-    from flag_attn.dropout import dropout_mask
     o_hyp, _, _, seed, offset = flag_attn.flash_attention(q, k, v, causal, dropout_p=dropout_p, return_seed_offset=True)
-    mask = dropout_mask(q, B, H, M, N, dropout_p, seed, offset)
+    mask = flag_attn.testing.recompute_mask(B, H, M, N, dropout_p, seed, offset, device)
     o_ref = flag_attn.testing.flash_attention(q, k, v, causal, dropout_p=dropout_p, dropout_mask=mask, upcast=True)
     o_torch = flag_attn.testing.flash_attention(q, k, v, causal, dropout_p=dropout_p, dropout_mask=mask, upcast=False)
 
@@ -295,23 +294,15 @@ def test_attention_bwd_dropout(B, H, M, N, D, causal, dropout_p, stride_order, d
         v = torch.empty((B, N, H, D), dtype=dtype, device=device).normal_(mean=0., std=scale).transpose(1, 2).requires_grad_()
         do = torch.randn((B, M, H, D), dtype=dtype, device=device).transpose(1, 2)
 
-
-    from flag_attn.dropout import dropout_mask
     # from flag_attn.dropout import philox_cuda_seed_offset
-    # philox_cuda_seed_offset(increment)
     o_hyp, _, _, seed, offset = flag_attn.flash_attention(q, k, v, causal=causal, dropout_p=dropout_p, return_seed_offset=True)
-    mask = dropout_mask(q, B, H, M, N, dropout_p, seed, offset)
-    # print('mask', mask.to(torch.int))
+    mask = flag_attn.testing.recompute_mask(B, H, M, N, dropout_p, seed, offset, device)
     o_ref = flag_attn.testing.flash_attention(q, k, v, causal=causal, dropout_p=dropout_p, dropout_mask=mask, upcast=True)
     o_torch = flag_attn.testing.flash_attention(q, k, v, causal=causal, dropout_p=dropout_p, dropout_mask=mask, upcast=False)
 
     gq_ref, gk_ref, gv_ref = torch.autograd.grad(o_ref, (q, k, v), do)
     gq_torch, gk_torch, gv_torch = torch.autograd.grad(o_torch, (q, k, v), do)
     gq_hyp, gk_hyp, gv_hyp = torch.autograd.grad(o_hyp, (q, k, v), do)
-
-    # print('dv_ref', gv_ref)
-    # print('dv', gv_hyp)
-    # print('dv_torch', gv_torch)
 
     o_torch_max_diff = max_diff(o_torch, o_ref)
     gq_torch_max_diff = max_diff(gq_torch, gq_ref)
