@@ -224,11 +224,12 @@ print(gq)
 - 支持前向和反向计算；
 - K/V 的序列长度可以不等于 Q 的序列长度；
 - 支持计算每个 k 从所有 q 得到的 attention 总和。
+- 支持 [MQA](https://arxiv.org/abs/1911.02150) and [GQA](https://arxiv.org/pdf/2305.13245).
+- 支持对 attention weights 进行 dropout.
 
 #### 限制
 
 - `headdim` 必须为 `[16, 32, 64, 128]` 之一；
-- 尚未支持对 attention weight 使用 dropout。
 
 ## TODOs
 
